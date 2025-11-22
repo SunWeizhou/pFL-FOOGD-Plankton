@@ -50,15 +50,17 @@ def create_clients(n_clients, model_template, foogd_template, client_loaders, de
         client_model, _ = create_fedrod_model(
             model_type=model_type,
             num_classes=54,
-            use_foogd=False 
+            use_foogd=False
         )
         client_model.load_state_dict(model_template.state_dict())
+        client_model = client_model.to(device)  # 将客户端模型移动到设备
 
         # 2. 深拷贝 FOOGD 模块 (关键修正！)
         # 必须让每个客户端拥有独立的 Score Model 副本
         client_foogd = None
         if foogd_template is not None:
             client_foogd = copy.deepcopy(foogd_template)
+            client_foogd = client_foogd.to(device)  # 将FOOGD模块移动到设备
 
         client = FLClient(
             client_id=client_id,
@@ -105,6 +107,8 @@ def federated_training(args):
         use_foogd=args.use_foogd
     )
 
+    # 将模型移动到设备
+    global_model = global_model.to(device)
     if foogd_module:
         foogd_module = foogd_module.to(device)
 

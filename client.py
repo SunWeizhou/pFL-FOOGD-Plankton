@@ -69,6 +69,7 @@ class FLClient:
         Returns:
             augmented_images: 增强后的图像张量
         """
+        import torchvision.transforms as transforms
         batch_size = images.size(0)
         augmented_images = []
 
