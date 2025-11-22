@@ -4,7 +4,8 @@
       "Bash(powershell:*)",
       "Bash(git reset:*)",
       "Bash(git commit -m \"$(cat <<''EOF''\nAdd project documentation and FOOGD corrections\n\n- Add FOOGD correction documentation\n- Add new project work documentation\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n)\")",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(where:*)"
     ],
     "deny": [],
     "ask": []
