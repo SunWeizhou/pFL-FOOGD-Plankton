@@ -184,6 +184,3 @@ FOOGD集成两个OOD组件：
 - FOOGD: "Feature-Oriented Out-of-Distribution Generalization and Detection"
 - Han et al. - "Benchmarking Out-of-Distribution Detection for Plankton Recognition"
 
-## 许可证
-
-本项目仅供学术研究使用。
