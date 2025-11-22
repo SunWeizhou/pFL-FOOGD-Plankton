@@ -288,11 +288,11 @@ class FOOGD_Module(nn.Module):
 
         # Term 2: s(x)^T * grad_x' k(x,x')
         # grad_x' k = 1/sigma^2 * (x-x') * k
-        term2 = torch.einsum('bi, bij -> bj', scores, X_diff) * K_xx / (sigma**2 + 1e-8)
+        term2 = torch.einsum('id, ijd -> ij', scores, X_diff) * K_xx / (sigma**2 + 1e-8)
 
         # Term 3: s(x')^T * grad_x k(x,x')
         # grad_x k = -1/sigma^2 * (x-x') * k
-        term3 = -torch.einsum('bj, bij -> bi', scores, X_diff) * K_xx / (sigma**2 + 1e-8)
+        term3 = -torch.einsum('jd, ijd -> ij', scores, X_diff) * K_xx / (sigma**2 + 1e-8)
 
         # Term 4: trace(grad_x grad_x' k)
         # double grad RBF kernel
