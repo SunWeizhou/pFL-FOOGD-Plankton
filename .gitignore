@@ -6,6 +6,8 @@ data/
 *.h5
 *.npy
 
+DYB-PlanktonNet/
+
 # 实验输出
 experiments/
 test_evaluation/
@@ -58,3 +60,15 @@ logs/
 # 临时文件
 *.tmp
 *.temp
+
+# 只允许上传 .py, .md, .txt 文件
+# 首先忽略所有文件
+*
+# 然后允许特定文件类型
+!*.py
+!*.md
+!*.txt
+!.gitignore
+
+# 忽略虚拟环境
+gpu_env/
