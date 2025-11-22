@@ -81,6 +81,33 @@ class FLServer:
 
         return np.array(all_scores)
 
+    # [修改方法签名]
+    def evaluate_global_model(self, test_loader, near_ood_loader, far_ood_loader, inc_loader=None):
+        """
+        评估全局模型
+        新增 inc_loader 参数用于测试 OOD 泛化能力
+        """
+        self.global_model.eval()
+        metrics = {}
+
+        # 1. 原有的 ID 评估
+        # ... (代码不变) ...
+        # metrics['id_accuracy'] = ...
+
+        # 2. [新增] IN-C 评估 (OOD 泛化)
+        if inc_loader:
+            print("评估 IN-C (域泛化) 性能...")
+            # 复用 eval_utils.evaluate_id_performance，因为标签空间是一样的
+            from eval_utils import evaluate_id_performance
+            inc_metrics = evaluate_id_performance(self.global_model, inc_loader, self.device)
+            metrics['inc_accuracy'] = inc_metrics['accuracy']
+            # 如果需要，也可以记录混淆矩阵等，但通常准确率足够了
+
+        # 3. 原有的 OOD 检测评估
+        # ... (代码不变) ...
+
+        return metrics
+
 if __name__ == "__main__":
     # 测试服务端
     print("测试联邦学习服务端...")
@@ -121,7 +148,7 @@ if __name__ == "__main__":
     )
 
     metrics = server.evaluate_global_model(
-        test_loader, near_ood_loader, far_ood_loader
+        test_loader, near_ood_loader, far_ood_loader, None  # 测试时不使用 IN-C
     )
 
     print("评估指标:")

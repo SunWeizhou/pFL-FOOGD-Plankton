@@ -91,7 +91,7 @@ def federated_training(args):
 
     # 创建数据加载器
     print("\n创建数据加载器...")
-    client_loaders, test_loader, near_ood_loader, far_ood_loader = create_federated_loaders(
+    client_loaders, test_loader, near_ood_loader, far_ood_loader, inc_loader = create_federated_loaders(
         data_root=args.data_root,
         n_clients=args.n_clients,
         alpha=args.alpha,
@@ -125,7 +125,8 @@ def federated_training(args):
     training_history = {
         'rounds': [],
         'train_losses': [],
-        'test_accuracies': [],
+        'test_accuracies': [],  # ID (Clean) Accuracy
+        'inc_accuracies': [],   # IN-C (Corrupted) Accuracy <- 新增
         'test_losses': [],
         'near_auroc': [],
         'far_auroc': []
@@ -180,8 +181,9 @@ def federated_training(args):
         if (round_num + 1) % args.eval_frequency == 0 or round_num == args.communication_rounds - 1:
             print("\n评估全局模型...")
 
+            # [修改] 传入 inc_loader
             test_metrics = server.evaluate_global_model(
-                test_loader, near_ood_loader, far_ood_loader
+                test_loader, near_ood_loader, far_ood_loader, inc_loader
             )
 
             # 更新历史
@@ -194,6 +196,14 @@ def federated_training(args):
                 training_history['near_auroc'].append(test_metrics['near_auroc'])
             if 'far_auroc' in test_metrics:
                 training_history['far_auroc'].append(test_metrics['far_auroc'])
+
+            # [新增] 记录并打印 IN-C 结果
+            if 'inc_accuracy' in test_metrics:
+                acc = test_metrics['inc_accuracy']
+                training_history['inc_accuracies'].append(acc)
+                print(f"  IN-C 准确率 (泛化): {acc:.4f}")
+                # 对比 ID 准确率，可以直观看到下降幅度
+                print(f"  准确率下降 (Drop): {test_metrics['id_accuracy'] - acc:.4f}")
 
             # 打印评估结果
             print(f"  ID准确率: {test_metrics['id_accuracy']:.4f}")
@@ -261,10 +271,12 @@ def plot_training_curves(history, output_dir):
     # 准确率曲线
     plt.subplot(2, 2, 2)
     plt.plot(history['rounds'], history['test_accuracies'], 'g-', label='测试准确率')
+    if history['inc_accuracies']:
+        plt.plot(history['rounds'], history['inc_accuracies'], 'c-', label='IN-C准确率')
     plt.xlabel('通信轮次')
     plt.ylabel('准确率')
     plt.legend()
-    plt.title('测试准确率')
+    plt.title('测试准确率 (ID vs IN-C)')
 
     # OOD检测性能
     if history['near_auroc']:
@@ -342,6 +354,11 @@ def main():
     if training_history['test_accuracies']:
         final_acc = training_history['test_accuracies'][-1]
         print(f"最终测试准确率: {final_acc:.4f}")
+
+    if training_history['inc_accuracies']:
+        final_inc_acc = training_history['inc_accuracies'][-1]
+        print(f"最终IN-C准确率: {final_inc_acc:.4f}")
+        print(f"泛化性能下降: {final_acc - final_inc_acc:.4f}")
 
     if training_history['near_auroc']:
         final_near_auroc = training_history['near_auroc'][-1]

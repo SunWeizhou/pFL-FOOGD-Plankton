@@ -232,6 +232,7 @@ def create_federated_loaders(data_root, n_clients=10, alpha=0.1, batch_size=32, 
         test_loader: 测试数据加载器
         near_ood_loader: Near-OOD数据加载器
         far_ood_loader: Far-OOD数据加载器
+        inc_loader: IN-C (域泛化) 数据加载器
     """
     train_transform, val_transform = get_transforms(image_size)
 
@@ -260,21 +261,86 @@ def create_federated_loaders(data_root, n_clients=10, alpha=0.1, batch_size=32, 
     near_ood_loader = DataLoader(near_ood_dataset, batch_size=batch_size, shuffle=False)
     far_ood_loader = DataLoader(far_ood_dataset, batch_size=batch_size, shuffle=False)
 
+    # [新增] 创建 IN-C 加载器
+    inc_loader = get_inc_loader(data_root, batch_size, image_size, severity=3)
+
     print(f"联邦学习数据加载器创建完成:")
     print(f"  - 客户端数量: {len(client_loaders)}")
     print(f"  - 测试集: {len(test_dataset)} 样本")
     print(f"  - Near-OOD: {len(near_ood_dataset)} 样本")
     print(f"  - Far-OOD: {len(far_ood_dataset)} 样本")
+    print(f"  - IN-C (OOD泛化测试): {len(inc_loader.dataset)} 样本")
 
-    return client_loaders, test_loader, near_ood_loader, far_ood_loader
+    # [修改] 返回值增加 inc_loader (建议放在最后)
+    return client_loaders, test_loader, near_ood_loader, far_ood_loader, inc_loader
 
+# [新增类] 模拟海洋环境的图像腐蚀
+class Corruptions:
+    """
+    模拟海洋环境的常见图像腐蚀 (IN-C 风格)
+    用于评估 OOD 泛化能力 (Challenge 2)
+    """
+    @staticmethod
+    def gaussian_blur(img, severity=1):
+        # 模拟水体浑浊
+        # severity 1-5 控制模糊程度
+        kernel_sizes = [3, 5, 7, 9, 11]
+        k = kernel_sizes[min(severity-1, 4)]
+        return transforms.GaussianBlur(kernel_size=k, sigma=(0.1, 2.0))(img)
+
+    @staticmethod
+    def brightness(img, severity=1):
+        # 模拟深海光照不足
+        factors = [0.9, 0.8, 0.7, 0.6, 0.5]
+        f = factors[min(severity-1, 4)]
+        return transforms.functional.adjust_brightness(img, f)
+
+    @staticmethod
+    def gaussian_noise(img, severity=1):
+        # 模拟传感器噪点
+        variances = [0.01, 0.03, 0.05, 0.08, 0.1]
+        v = variances[min(severity-1, 4)]
+
+        # 需要先转 Tensor 再加噪
+        if not isinstance(img, torch.Tensor):
+            img_t = transforms.ToTensor()(img)
+        else:
+            img_t = img
+
+        noise = torch.randn_like(img_t) * v
+        img_noisy = torch.clamp(img_t + noise, 0, 1)
+
+        # 转回 PIL Image 以适配后续 transform 流程 (视具体 pipeline 而定)
+        return transforms.ToPILImage()(img_noisy)
+
+# [新增函数] 获取 IN-C 加载器
+def get_inc_loader(data_root, batch_size=32, image_size=224, severity=3):
+    """
+    创建 IN-C (域泛化) 测试加载器
+    使用 ID 测试集数据，但应用 '水体浑浊' (高斯模糊) 等腐蚀变换
+    """
+    # 定义腐蚀变换链
+    # 注意：Normalize 必须在最后
+    inc_transform = transforms.Compose([
+        transforms.Resize((image_size, image_size)),
+        # 在这里插入腐蚀操作，例如模拟 3 级浑浊
+        transforms.Lambda(lambda x: Corruptions.gaussian_blur(x, severity=severity)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+
+    # 复用 ID 测试集的数据路径，但使用 inc_transform
+    inc_dataset = PlanktonDataset(data_root, transform=inc_transform, mode='test')
+
+    inc_loader = DataLoader(inc_dataset, batch_size=batch_size, shuffle=False)
+    return inc_loader
 
 if __name__ == "__main__":
     # 测试数据加载器
     data_root = "./data"
 
     try:
-        client_loaders, test_loader, near_ood_loader, far_ood_loader = create_federated_loaders(
+        client_loaders, test_loader, near_ood_loader, far_ood_loader, inc_loader = create_federated_loaders(
             data_root, n_clients=3, batch_size=4, image_size=224
         )
 
