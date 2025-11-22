@@ -61,14 +61,15 @@ logs/
 *.tmp
 *.temp
 
-# 只允许上传 .py, .md, .txt 文件
-# 首先忽略所有文件
-*
-# 然后允许特定文件类型
-!*.py
-!*.md
-!*.txt
-!.gitignore
-
 # 忽略虚拟环境
 gpu_env/
+
+# 【关键修改】允许上传的文件类型（补充大写 .MD，调整规则顺序避免冲突）
+# 1. 先忽略所有文件
+*
+# 2. 允许核心文件类型（包含小写 .md 和大写 .MD）
+!*.py          # 允许所有 .py 文件（你的 models.py、client.py 等）
+!*.md          # 允许小写 .md（如 README.md）
+!*.MD          # 允许大写 .MD（如 新项目工作文档.MD）
+!*.txt         # 允许 .txt 文件（如 requirements.txt）
+!.gitignore    # 保留 .gitignore 本身（必须允许，否则会被自己忽略）
