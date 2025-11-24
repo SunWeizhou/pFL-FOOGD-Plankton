@@ -10,6 +10,7 @@
 import os
 import numpy as np
 import torch
+import pickle
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 from PIL import Image
@@ -53,7 +54,7 @@ FAR_OOD_CLASSES = [
 # data_utils.py
 
 class PlanktonDataset(Dataset):
-    """浮游生物数据集类 - 支持联邦学习"""
+    """浮游生物数据集类 - 支持缓存加速"""
 
     def __init__(self, root_dir, transform=None, mode='train', client_id=None):
         self.root_dir = root_dir
@@ -62,7 +63,6 @@ class PlanktonDataset(Dataset):
         self.client_id = client_id
         self.image_paths = []
         self.labels = []
-        self.label_to_idx = {}
 
         # ============================================================
         # 1. 确定当前模式对应的数据目录
@@ -81,13 +81,12 @@ class PlanktonDataset(Dataset):
             raise ValueError(f"Unknown mode: {mode}")
 
         # ============================================================
-        # 2. 建立标签映射 (修复标签错位问题)
+        # 2. 建立标签映射 (保留原有逻辑)
         # ============================================================
-        # 始终以 D_ID_train 目录下的文件夹为基准，建立 0-53 的映射
         base_train_dir = os.path.join(root_dir, 'D_ID_train')
         if os.path.exists(base_train_dir):
             id_dirs = sorted([
-                d for d in os.listdir(base_train_dir) 
+                d for d in os.listdir(base_train_dir)
                 if os.path.isdir(os.path.join(base_train_dir, d))
             ])
             self.class_to_idx = {dirname: idx for idx, dirname in enumerate(id_dirs)}
@@ -95,36 +94,53 @@ class PlanktonDataset(Dataset):
             print(f"Warning: Base train dir {base_train_dir} not found for label mapping")
 
         # ============================================================
-        # 3. 加载图像数据
+        # 3. 加载图像数据 (新增缓存逻辑)
         # ============================================================
-        if os.path.exists(data_dir):
-            for dir_name in os.listdir(data_dir):
-                class_dir = os.path.join(data_dir, dir_name)
-                if not os.path.isdir(class_dir):
-                    continue
+        # 定义缓存文件路径，例如: ./Plankton_OOD_Dataset/cache_train.pkl
+        cache_file = os.path.join(root_dir, f"cache_{mode}.pkl")
 
-                # 确定标签
-                current_label = -1
-                if mode in ['train', 'val', 'test']:
-                    if dir_name in self.class_to_idx:
-                        current_label = self.class_to_idx[dir_name]
-                    else:
-                        continue
-                else:
-                    current_label = -1
-
-                # 加载图片
-                for img_name in os.listdir(class_dir):
-                    if img_name.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif')):
-                        img_path = os.path.join(class_dir, img_name)
-                        self.image_paths.append(img_path)
-                        self.labels.append(current_label)
+        if os.path.exists(cache_file):
+            # 命中缓存：直接加载，秒开
+            print(f"Loading cached file list from {cache_file}...")
+            with open(cache_file, 'rb') as f:
+                cache_data = pickle.load(f)
+            self.image_paths = cache_data['paths']
+            self.labels = cache_data['labels']
         else:
-            print(f"Warning: Data directory {data_dir} does not exist")
+            # 未命中缓存：执行原来的扫描逻辑
+            print(f"Scanning files for {mode} dataset (this may take a while)...")
+            if os.path.exists(data_dir):
+                for dir_name in os.listdir(data_dir):
+                    class_dir = os.path.join(data_dir, dir_name)
+                    if not os.path.isdir(class_dir):
+                        continue
+
+                    # 确定标签
+                    current_label = -1
+                    if mode in ['train', 'val', 'test']:
+                        if dir_name in self.class_to_idx:
+                            current_label = self.class_to_idx[dir_name]
+                        else:
+                            continue
+                    else:
+                        current_label = -1
+
+                    # 加载图片
+                    for img_name in os.listdir(class_dir):
+                        if img_name.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif')):
+                            img_path = os.path.join(class_dir, img_name)
+                            self.image_paths.append(img_path)
+                            self.labels.append(current_label)
+
+                # 扫描完成后，保存到缓存
+                print(f"Saving scanned list to {cache_file}...")
+                with open(cache_file, 'wb') as f:
+                    pickle.dump({'paths': self.image_paths, 'labels': self.labels}, f)
+            else:
+                print(f"Warning: Data directory {data_dir} does not exist")
 
         print(f"Loaded {len(self.image_paths)} images for {mode} dataset")
 
-    # === 以下是必须保留的方法，缺失会导致 no len() 错误 ===
     def __len__(self):
         return len(self.image_paths)
 
@@ -132,14 +148,12 @@ class PlanktonDataset(Dataset):
         img_path = self.image_paths[idx]
         label = self.labels[idx]
 
-        # 加载图像
         try:
             image = Image.open(img_path).convert('RGB')
         except Exception as e:
             print(f"Error loading image {img_path}: {e}")
             image = Image.new('RGB', (224, 224), color='black')
 
-        # 应用变换
         if self.transform:
             image = self.transform(image)
 
