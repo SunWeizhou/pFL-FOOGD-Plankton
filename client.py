@@ -49,11 +49,12 @@ class FLClient:
 
     def _setup_augmentations(self):
         """设置数据增强变换"""
-        # 定义反归一化 (用于将 Tensor 还原回 [0,1] 范围，以便转 PIL)
+        # 1. 定义反归一化参数 (用于将 Tensor 还原回 [0,1] 范围)
+        # 必须与 data_utils.py 中的均值和方差一致
         self.mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1).to(self.device)
         self.std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1).to(self.device)
 
-        # 强增强流程
+        # 2. 强增强流程：输入 PIL -> 输出 归一化后的 Tensor
         self.strong_augmentation = transforms.Compose([
             transforms.RandomResizedCrop(224, scale=(0.8, 1.0)),
             transforms.RandomHorizontalFlip(p=0.5),
@@ -61,36 +62,46 @@ class FLClient:
             transforms.RandomGrayscale(p=0.2),
             transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0)),
             transforms.ToTensor(),
-            # [关键修正] 强增强后必须重新归一化！
+            # [关键修正] 强增强后必须重新归一化，以匹配骨干网络的输入要求
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
 
     def _apply_strong_augmentation(self, images):
         """
         应用强数据增强
+
         Args:
-            images: 归一化后的原始图像张量 [batch_size, 3, height, width]
+            images: 已经被 data_utils 归一化过的原始图像张量 [batch_size, 3, height, width]
+                    数值范围约在 -2 到 2 之间
+
+        Returns:
+            augmented_images: 增强并重新归一化后的图像张量
         """
         batch_size = images.size(0)
         augmented_images = []
 
-        # 确保反归一化参数在正确设备上
+        # 确保反归一化参数在正确设备上 (防止 device 不一致报错)
         if self.mean.device != images.device:
             self.mean = self.mean.to(images.device)
             self.std = self.std.to(images.device)
 
         for i in range(batch_size):
-            # 1. [关键修正] 先反归一化 (Un-normalize)，恢复到 [0, 1] 甚至略微越界
-            # img = images[i] * std + mean
+            # 1. [关键修正] 反归一化 (Un-normalize)
+            # 将 [-2, 2] 的分布还原回近似 [0, 1] 的分布
+            # 公式: original = normalized * std + mean
             img_unnorm = images[i] * self.std + self.mean
-            # 截断到 [0, 1] 范围以防万一
+
+            # 2. 截断保护
+            # 数值运算可能会产生微小的越界 (如 -0.0001 或 1.0001)，导致 ToPILImage 报错或截断异常
             img_unnorm = torch.clamp(img_unnorm, 0, 1)
 
-            # 2. 转 PIL
+            # 3. 转 PIL 图片 (现在数据是 [0, 1] 范围，转换是安全的)
             img_pil = transforms.ToPILImage()(img_unnorm)
 
-            # 3. 应用强增强 (内部包含 ToTensor 和 Normalize)
+            # 4. 应用强增强
+            # 包含: 随机变换 -> ToTensor -> Normalize (再次归一化)
             img_aug = self.strong_augmentation(img_pil)
+
             augmented_images.append(img_aug)
 
         return torch.stack(augmented_images).to(images.device)
