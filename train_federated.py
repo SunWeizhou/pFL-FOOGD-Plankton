@@ -261,22 +261,22 @@ def plot_training_curves(history, output_dir):
 
     # 损失曲线
     plt.subplot(2, 2, 1)
-    plt.plot(history['rounds'], history['train_losses'], 'b-', label='训练损失')
-    plt.plot(history['rounds'], history['test_losses'], 'r-', label='测试损失')
-    plt.xlabel('通信轮次')
-    plt.ylabel('损失')
+    plt.plot(history['rounds'], history['train_losses'], 'b-', label='Training Loss')
+    plt.plot(history['rounds'], history['test_losses'], 'r-', label='Test Loss')
+    plt.xlabel('Communication Rounds')
+    plt.ylabel('Loss')
     plt.legend()
-    plt.title('训练和测试损失')
+    plt.title('Training and Test Loss')
 
     # 准确率曲线
     plt.subplot(2, 2, 2)
-    plt.plot(history['rounds'], history['test_accuracies'], 'g-', label='测试准确率')
+    plt.plot(history['rounds'], history['test_accuracies'], 'g-', label='Test Accuracy')
     if history['inc_accuracies']:
-        plt.plot(history['rounds'], history['inc_accuracies'], 'c-', label='IN-C准确率')
-    plt.xlabel('通信轮次')
-    plt.ylabel('准确率')
+        plt.plot(history['rounds'], history['inc_accuracies'], 'c-', label='IN-C Accuracy')
+    plt.xlabel('Communication Rounds')
+    plt.ylabel('Accuracy')
     plt.legend()
-    plt.title('测试准确率 (ID vs IN-C)')
+    plt.title('Test Accuracy (ID vs IN-C)')
 
     # OOD检测性能
     if history['near_auroc']:
@@ -284,10 +284,10 @@ def plot_training_curves(history, output_dir):
         plt.plot(history['rounds'], history['near_auroc'], 'orange', label='Near-OOD AUROC')
         if history['far_auroc']:
             plt.plot(history['rounds'], history['far_auroc'], 'purple', label='Far-OOD AUROC')
-        plt.xlabel('通信轮次')
+        plt.xlabel('Communication Rounds')
         plt.ylabel('AUROC')
         plt.legend()
-        plt.title('OOD检测性能')
+        plt.title('OOD Detection Performance')
 
     plt.tight_layout()
     plot_path = os.path.join(output_dir, "training_curves.png")

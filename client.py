@@ -41,8 +41,8 @@ class FLClient:
         )
 
         # 损失权重
-        self.lambda_ksd = 0.01  # KSD损失权重
-        self.lambda_sm = 0.01   # 评分匹配损失权重
+        self.lambda_ksd = 0.0005  # KSD损失权重
+        self.lambda_sm = 0.005   # 评分匹配损失权重
 
         # 数据增强变换
         self._setup_augmentations()
@@ -82,7 +82,7 @@ class FLClient:
 
         return torch.stack(augmented_images).to(images.device)
 
-     def train_step(self, local_epochs=1):
+    def train_step(self, local_epochs=1):
         self.model.train()
         if self.foogd_module:
             self.foogd_module.train()

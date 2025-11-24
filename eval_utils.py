@@ -215,10 +215,10 @@ def plot_ood_detection_results(id_scores, ood_scores, output_path):
     plt.subplot(1, 3, 1)
     plt.hist(id_scores, bins=50, alpha=0.7, label='ID', density=True)
     plt.hist(ood_scores, bins=50, alpha=0.7, label='OOD', density=True)
-    plt.xlabel('OOD分数')
-    plt.ylabel('密度')
+    plt.xlabel('OOD Score')
+    plt.ylabel('Density')
     plt.legend()
-    plt.title('OOD分数分布')
+    plt.title('OOD Score Distribution')
 
     # ROC曲线
     plt.subplot(1, 3, 2)
@@ -229,11 +229,11 @@ def plot_ood_detection_results(id_scores, ood_scores, output_path):
     auroc = roc_auc_score(labels, scores)
 
     plt.plot(fpr, tpr, 'b-', label=f'AUROC = {auroc:.4f}')
-    plt.plot([0, 1], [0, 1], 'r--', label='随机分类器')
-    plt.xlabel('假正率 (FPR)')
-    plt.ylabel('真正率 (TPR)')
+    plt.plot([0, 1], [0, 1], 'r--', label='Random Classifier')
+    plt.xlabel('False Positive Rate (FPR)')
+    plt.ylabel('True Positive Rate (TPR)')
     plt.legend()
-    plt.title('ROC曲线')
+    plt.title('ROC Curve')
 
     # Precision-Recall曲线
     plt.subplot(1, 3, 3)
@@ -241,10 +241,10 @@ def plot_ood_detection_results(id_scores, ood_scores, output_path):
     aupr = average_precision_score(labels, scores)
 
     plt.plot(recall, precision, 'g-', label=f'AUPR = {aupr:.4f}')
-    plt.xlabel('召回率')
-    plt.ylabel('精确率')
+    plt.xlabel('Recall')
+    plt.ylabel('Precision')
     plt.legend()
-    plt.title('Precision-Recall曲线')
+    plt.title('Precision-Recall Curve')
 
     plt.tight_layout()
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
@@ -268,9 +268,9 @@ def plot_confusion_matrix(cm, class_names, output_path):
     sns.heatmap(cm_normalized, annot=True, fmt='.2f', cmap='Blues',
                 xticklabels=class_names[:10], yticklabels=class_names[:10])  # 只显示前10个类别
 
-    plt.xlabel('预测标签')
-    plt.ylabel('真实标签')
-    plt.title('混淆矩阵 (归一化)')
+    plt.xlabel('Predicted Label')
+    plt.ylabel('True Label')
+    plt.title('Confusion Matrix (Normalized)')
     plt.tight_layout()
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close()
