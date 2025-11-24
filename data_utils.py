@@ -257,7 +257,7 @@ def create_federated_loaders(data_root, n_clients=10, alpha=0.1, batch_size=32, 
     for client_id in range(n_clients):
         client_dataset = torch.utils.data.Subset(train_dataset, client_indices[client_id])
         client_loader = DataLoader(
-            client_dataset, batch_size=batch_size, shuffle=True
+            client_dataset, batch_size=batch_size, shuffle=True, drop_last=True
         )
         client_loaders.append(client_loader)
         print(f"客户端 {client_id}: {len(client_dataset)} 样本")
