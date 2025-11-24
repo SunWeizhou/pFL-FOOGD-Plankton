@@ -253,54 +253,56 @@ class FOOGD_Module(nn.Module):
         这里我们实现一个基于 Score Model 指导的简化版分布对齐。
         """
 
-        # 获取 Score Model 对增强数据的评分 (梯度场)
-        # s_theta(z_aug)
+        # [关键修改] 计算 KSD 时，Score Model 应当是冻结的/只读的
+        # 防止 KSD 的梯度回传给 Score Model
         with torch.no_grad():
+            # 获取 Score Model 对增强数据的评分 (梯度场)
+            # s_theta(z_aug)
             score_aug = self.score_model(z_aug)
 
-        # 论文 Eq (10) Stein Operator 的核心思想：
-        # 我们希望 z_aug 落在 z (真实数据) 的高密度区域
-        # 这意味着 score_aug (增强数据的梯度) 应该和 (z - z_aug) 方向一致
-        # 或者更直接地，使用论文 Eq (12) 的逻辑：
-        # KSD 实际上是在用 Score Model 作为一个 Critic 来评判 z 和 z_aug 的分布差异
+            # 论文 Eq (10) Stein Operator 的核心思想：
+            # 我们希望 z_aug 落在 z (真实数据) 的高密度区域
+            # 这意味着 score_aug (增强数据的梯度) 应该和 (z - z_aug) 方向一致
+            # 或者更直接地，使用论文 Eq (12) 的逻辑：
+            # KSD 实际上是在用 Score Model 作为一个 Critic 来评判 z 和 z_aug 的分布差异
 
-        # 简化实现（基于 PyTorch 自动微分计算 KSD 梯度代价太高）：
-        # 我们利用 Stein Identity 的性质：E[Score(x) * f(x) + grad(f(x))] = 0
-        # 此处采用 Liu & Wang (SVGD作者) 的经典 KSD 估计器实现
+            # 简化实现（基于 PyTorch 自动微分计算 KSD 梯度代价太高）：
+            # 我们利用 Stein Identity 的性质：E[Score(x) * f(x) + grad(f(x))] = 0
+            # 此处采用 Liu & Wang (SVGD作者) 的经典 KSD 估计器实现
 
-        features = z
-        K_xx, sigma = self.rbf_kernel_matrix(features, features)
+            features = z
+            K_xx, sigma = self.rbf_kernel_matrix(features, features)
 
-        # score vectors: s_theta(z)
-        scores = self.score_model(features)
+            # score vectors: s_theta(z)
+            scores = self.score_model(features)
 
-        # 具体的 KSD 计算 (u-statistic estimator)
-        # Term 1: s(x)^T s(x') * k(x,x')
-        # [B, B]
-        term1 = torch.matmul(scores, scores.t()) * K_xx
+            # 具体的 KSD 计算 (u-statistic estimator)
+            # Term 1: s(x)^T s(x') * k(x,x')
+            # [B, B]
+            term1 = torch.matmul(scores, scores.t()) * K_xx
 
-        # 由于 RBF 核梯度有解析解: grad_x k(x,y) = -1/sigma^2 * (x-y) * k(x,y)
-        # 我们可以手动计算 Term 2 & 3 以避免二阶导数
+            # 由于 RBF 核梯度有解析解: grad_x k(x,y) = -1/sigma^2 * (x-y) * k(x,y)
+            # 我们可以手动计算 Term 2 & 3 以避免二阶导数
 
-        B = features.size(0)
-        # (x_i - x_j) 矩阵: [B, B, Dim]
-        X_diff = features.unsqueeze(1) - features.unsqueeze(0)
+            B = features.size(0)
+            # (x_i - x_j) 矩阵: [B, B, Dim]
+            X_diff = features.unsqueeze(1) - features.unsqueeze(0)
 
-        # Term 2: s(x)^T * grad_x' k(x,x')
-        # grad_x' k = 1/sigma^2 * (x-x') * k
-        term2 = torch.einsum('id, ijd -> ij', scores, X_diff) * K_xx / (sigma**2 + 1e-8)
+            # Term 2: s(x)^T * grad_x' k(x,x')
+            # grad_x' k = 1/sigma^2 * (x-x') * k
+            term2 = torch.einsum('id, ijd -> ij', scores, X_diff) * K_xx / (sigma**2 + 1e-8)
 
-        # Term 3: s(x')^T * grad_x k(x,x')
-        # grad_x k = -1/sigma^2 * (x-x') * k
-        term3 = -torch.einsum('jd, ijd -> ij', scores, X_diff) * K_xx / (sigma**2 + 1e-8)
+            # Term 3: s(x')^T * grad_x k(x,x')
+            # grad_x k = -1/sigma^2 * (x-x') * k
+            term3 = -torch.einsum('jd, ijd -> ij', scores, X_diff) * K_xx / (sigma**2 + 1e-8)
 
-        # Term 4: trace(grad_x grad_x' k)
-        # double grad RBF kernel
-        dim = features.size(1)
-        sq_dist = torch.sum(X_diff**2, dim=2)
-        term4 = (dim / (sigma**2) - sq_dist / (sigma**4)) * K_xx
+            # Term 4: trace(grad_x grad_x' k)
+            # double grad RBF kernel
+            dim = features.size(1)
+            sq_dist = torch.sum(X_diff**2, dim=2)
+            term4 = (dim / (sigma**2) - sq_dist / (sigma**4)) * K_xx
 
-        ksd = (term1 + term2 + term3 + term4).mean()
+            ksd = (term1 + term2 + term3 + term4).mean()
 
         # 我们希望最小化 KSD (让 p(z) 和 p(z_aug) 一致)
         return ksd

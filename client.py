@@ -44,6 +44,11 @@ class FLClient:
         self.lambda_ksd = 0.0005  # KSD损失权重
         self.lambda_sm = 0.005   # 评分匹配损失权重
 
+        # 傅里叶增强参数
+        self.use_fourier_aug = True  # 是否使用傅里叶增强
+        self.fourier_beta = 0.15     # 幅度谱混合比例
+        self.fourier_prob = 0.5      # 使用傅里叶增强的概率
+
         # 数据增强变换
         self._setup_augmentations()
 
@@ -106,6 +111,76 @@ class FLClient:
 
         return torch.stack(augmented_images).to(images.device)
 
+    def _fourier_augmentation(self, images, beta=None):
+        """
+        傅里叶数据增强 (Fourier Augmentation)
+
+        基于论文 [79] 的逻辑，通过混合频域信息实现风格迁移
+
+        Args:
+            images: 原始图像张量 [batch_size, 3, height, width]
+            beta: 幅度谱混合比例，如果为None则使用self.fourier_beta
+
+        Returns:
+            augmented_images: 傅里叶增强后的图像张量
+        """
+        if beta is None:
+            beta = self.fourier_beta
+        batch_size = images.size(0)
+
+        # 随机选择目标风格图像 (从同一batch中随机选择)
+        target_indices = torch.randperm(batch_size)
+        target_images = images[target_indices]
+
+        augmented_images = []
+
+        for i in range(batch_size):
+            x = images[i]  # 原始图像 [3, height, width]
+            target_x = target_images[i]  # 目标风格图像 [3, height, width]
+
+            # 1. FFT 变换 (在空间维度上进行)
+            fft_x = torch.fft.fftn(x, dim=(-2, -1))
+            fft_target = torch.fft.fftn(target_x, dim=(-2, -1))
+
+            # 2. 提取幅度谱 (Amplitude) 和 相位谱 (Phase)
+            amp_x, pha_x = torch.abs(fft_x), torch.angle(fft_x)
+            amp_target = torch.abs(fft_target)
+
+            # 3. 混合幅度谱 (Amplitude Mix)
+            # 使用线性插值混合幅度谱，保留原始图像的相位
+            amp_new = (1.0 - beta) * amp_x + beta * amp_target
+
+            # 4. 重建复数频域信号 (使用原始图像的相位)
+            fft_new = amp_new * torch.exp(1j * pha_x)
+
+            # 5. IFFT 逆变换回图像空间
+            x_aug = torch.fft.ifftn(fft_new, dim=(-2, -1)).real
+
+            # 6. 数值稳定性处理
+            # 确保增强后的图像在合理范围内
+            x_aug = torch.clamp(x_aug, torch.min(x), torch.max(x))
+
+            augmented_images.append(x_aug)
+
+        return torch.stack(augmented_images).to(images.device)
+
+    def _apply_hybrid_augmentation(self, images):
+        """
+        混合数据增强：结合传统增强和傅里叶增强
+
+        Args:
+            images: 原始图像张量 [batch_size, 3, height, width]
+
+        Returns:
+            augmented_images: 增强后的图像张量
+        """
+        if self.use_fourier_aug and torch.rand(1).item() < self.fourier_prob:
+            # 使用傅里叶增强
+            return self._fourier_augmentation(images, beta=self.fourier_beta)
+        else:
+            # 使用传统增强
+            return self._apply_strong_augmentation(images)
+
     def train_step(self, local_epochs=1):
         self.model.train()
         if self.foogd_module:
@@ -121,8 +196,8 @@ class FLClient:
             for batch_idx, (data, targets) in enumerate(self.train_loader):
                 data, targets = data.to(self.device), targets.to(self.device)
 
-                # 1. 数据增强
-                data_aug = self._apply_strong_augmentation(data)
+                # 1. 数据增强 (使用混合增强：传统增强 + 傅里叶增强)
+                data_aug = self._apply_hybrid_augmentation(data)
 
                 # 2. 前向传播
                 logits_g, logits_p, features = self.model(data)
