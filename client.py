@@ -55,45 +55,40 @@ class FLClient:
 
     def _fourier_augmentation(self, images, beta=None):
         """
-        傅里叶数据增强 (Fourier Augmentation) - 修正版
-        增加反归一化流程，确保在 [0,1] 空间进行频谱混合
+        傅里叶数据增强 (向量化版本) - 极大提升速度
+        直接对 [B, C, H, W] 整个批次进行运算，去除 for 循环
         """
         if beta is None:
             beta = self.fourier_beta
 
-        batch_size = images.size(0)
-
-        # 1. [关键修正] 反归一化：将 [-2.x, 2.x] 还原回 [0, 1]
-        # 必须确保 mean/std 和 images 在同一个 device
-        mean = self.mean.to(images.device)
-        std = self.std.to(images.device)
+        # 1. 反归一化
+        mean = self.mean.to(images.device).view(1, 3, 1, 1)
+        std = self.std.to(images.device).view(1, 3, 1, 1)
         x_unnorm = images * std + mean
 
-        # 随机选择目标风格图像
-        target_indices = torch.randperm(batch_size)
-        target_x_unnorm = x_unnorm[target_indices].clone()
+        # 2. 随机选择目标 (Shuffle Batch)
+        batch_size = images.size(0)
+        perm = torch.randperm(batch_size).to(images.device)
+        target_x_unnorm = x_unnorm[perm] # 整个batch乱序作为target
 
-        # 2. FFT 变换 (在 [0,1] 数据上进行)
+        # 3. FFT 变换 (直接对整个 Batch 操作)
+        # dim=(-2, -1) 表示只对最后两个维度(H, W)做变换，B和C维度自动保留
         fft_x = torch.fft.fftn(x_unnorm, dim=(-2, -1))
         fft_target = torch.fft.fftn(target_x_unnorm, dim=(-2, -1))
 
-        # 3. 提取幅度谱和相位谱
+        # 4. 提取幅度谱和相位谱
         amp_x, pha_x = torch.abs(fft_x), torch.angle(fft_x)
         amp_target = torch.abs(fft_target)
 
-        # 4. 混合幅度谱
-        # beta 可以是一个标量，也可以采样自 Beta 分布 (论文中通常使用 beta=1.0 但通过 alpha 采样混合比例)
-        # 这里沿用你的线性插值逻辑，这是最简单的实现
+        # 5. 混合幅度谱 (向量化操作)
         amp_new = (1.0 - beta) * amp_x + beta * amp_target
 
-        # 5. 重建并逆变换
+        # 6. 重建并逆变换
         fft_new = amp_new * torch.exp(1j * pha_x)
         x_aug_unnorm = torch.fft.ifftn(fft_new, dim=(-2, -1)).real
 
-        # 6. [关键修正] 在 [0,1] 空间截断，防止数值溢出
+        # 7. 截断与重新归一化
         x_aug_unnorm = torch.clamp(x_aug_unnorm, 0, 1)
-
-        # 7. [关键修正] 重新归一化回标准分布
         x_aug = (x_aug_unnorm - mean) / std
 
         return x_aug

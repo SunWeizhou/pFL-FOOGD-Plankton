@@ -257,7 +257,13 @@ def create_federated_loaders(data_root, n_clients=10, alpha=0.1, batch_size=32, 
     for client_id in range(n_clients):
         client_dataset = torch.utils.data.Subset(train_dataset, client_indices[client_id])
         client_loader = DataLoader(
-            client_dataset, batch_size=batch_size, shuffle=True, drop_last=True
+            client_dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            drop_last=True,
+            num_workers=8,     # 多进程加载数据
+            pin_memory=True,   # 开启锁页内存，加速 CPU->GPU 传输
+            persistent_workers=True # 避免每个epoch结束后销毁进程重建的开销
         )
         client_loaders.append(client_loader)
         print(f"客户端 {client_id}: {len(client_dataset)} 样本")
@@ -267,9 +273,27 @@ def create_federated_loaders(data_root, n_clients=10, alpha=0.1, batch_size=32, 
     near_ood_dataset = PlanktonDataset(data_root, transform=val_transform, mode='near_ood')
     far_ood_dataset = PlanktonDataset(data_root, transform=val_transform, mode='far_ood')
 
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
-    near_ood_loader = DataLoader(near_ood_dataset, batch_size=batch_size, shuffle=False)
-    far_ood_loader = DataLoader(far_ood_dataset, batch_size=batch_size, shuffle=False)
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=8,
+        pin_memory=True
+    )
+    near_ood_loader = DataLoader(
+        near_ood_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=8,
+        pin_memory=True
+    )
+    far_ood_loader = DataLoader(
+        far_ood_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=8,
+        pin_memory=True
+    )
 
     # [新增] 创建 IN-C 加载器
     inc_loader = get_inc_loader(data_root, batch_size, image_size, severity=3)
@@ -342,7 +366,13 @@ def get_inc_loader(data_root, batch_size=32, image_size=224, severity=3):
     # 复用 ID 测试集的数据路径，但使用 inc_transform
     inc_dataset = PlanktonDataset(data_root, transform=inc_transform, mode='test')
 
-    inc_loader = DataLoader(inc_dataset, batch_size=batch_size, shuffle=False)
+    inc_loader = DataLoader(
+        inc_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=8,
+        pin_memory=True
+    )
     return inc_loader
 
 if __name__ == "__main__":
