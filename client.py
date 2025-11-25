@@ -233,25 +233,37 @@ class FLClient:
         return generic_params, avg_loss
 
     def get_generic_parameters(self):
-        """获取通用参数 - 修复版"""
-        # 直接返回整个模型的 state_dict (包含 BN stats)
-        # 注意：FedRoD 理论上只聚合 Generic Head，但 backbone 的 BN 必须聚合
-        # 简单起见，我们可以返回整个 backbone + head_g
-
-        # 提取 backbone 和 head_g
         params = {}
-        full_state = self.model.state_dict()
 
-        for key, value in full_state.items():
-            if 'head_p' not in key: # 排除个性化头
-                params[key] = value.clone()
+        # 1. 获取主模型参数 (排除 head_p)
+        model_state = self.model.state_dict()
+        for key, value in model_state.items():
+            if 'head_p' not in key:
+                params[f"model.{key}"] = value.clone() # 添加前缀以区分
+
+        # 2. 获取 FOOGD 参数 [新增]
+        if self.foogd_module:
+            foogd_state = self.foogd_module.state_dict()
+            for key, value in foogd_state.items():
+                params[f"foogd.{key}"] = value.clone() # 添加前缀
 
         return params
 
     def set_generic_parameters(self, generic_params):
-        """设置通用参数 - 修复版"""
-        # 使用 load_state_dict (strict=False 允许忽略 head_p)
-        self.model.load_state_dict(generic_params, strict=False)
+        # 分离参数
+        model_params = {}
+        foogd_params = {}
+
+        for key, value in generic_params.items():
+            if key.startswith("model."):
+                model_params[key.replace("model.", "")] = value
+            elif key.startswith("foogd."):
+                foogd_params[key.replace("foogd.", "")] = value
+
+        # 加载参数
+        self.model.load_state_dict(model_params, strict=False)
+        if self.foogd_module and foogd_params:
+            self.foogd_module.load_state_dict(foogd_params)
 
     def evaluate(self, test_loader):
         """
