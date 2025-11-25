@@ -35,13 +35,19 @@ class FLClient:
         self.device = device
 
         # 优化器
-        self.optimizer = torch.optim.Adam(
+        # [删除或注释掉] 原来的 Adam
+        # self.optimizer = torch.optim.Adam(...)
+
+        # [新增] 使用 SGD，这是 FedAvg/FedRoD 的标配
+        self.optimizer = torch.optim.SGD(
             list(self.model.parameters()) + (list(self.foogd_module.parameters()) if foogd_module else []),
-            lr=1e-4, weight_decay=1e-5
+            lr=0.01,          # SGD 需要更大的学习率，Adam是1e-4，SGD建议 0.01 或 0.005
+            momentum=0.9,     # 加上动量
+            weight_decay=1e-5
         )
 
         # 损失权重
-        self.lambda_ksd = 0.0005  # KSD损失权重
+        self.lambda_ksd = 0.00005  # KSD损失权重
         self.lambda_sm = 0.005   # 评分匹配损失权重
 
         # 傅里叶增强参数
@@ -109,13 +115,23 @@ class FLClient:
             return images
 
     def train_step(self, local_epochs=1):
+        # [新增] 每一轮训练前，重置优化器状态，防止 Momentum 污染
+        # 注意：这里重新初始化优化器，确保它是全新的
+        if self.foogd_module:
+            params = list(self.model.parameters()) + list(self.foogd_module.parameters())
+        else:
+            params = self.model.parameters()
+
+        # 重新定义优化器 (使用 SGD)
+        self.optimizer = torch.optim.SGD(params, lr=0.01, momentum=0.9, weight_decay=1e-5)
+
         self.model.train()
         if self.foogd_module:
             self.foogd_module.train()
 
         total_loss = 0.0
         total_samples = 0
-        
+
         # 用于记录分项 Loss
         epoch_log = {'cls': 0.0, 'ksd': 0.0, 'sm': 0.0}
 
