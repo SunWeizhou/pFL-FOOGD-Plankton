@@ -22,23 +22,28 @@ class FLServer:
         # 1. Model Params
         for name, param in self.global_model.named_parameters():
             if 'head_p' not in name:
-                global_params[f"model.{name}"] = param.data.clone()
-        
+                # [修复] 去掉 "model." 前缀，直接使用 name
+                global_params[name] = param.data.clone()
+
         # 2. FOOGD Params
         if self.foogd_module:
             for name, param in self.foogd_module.named_parameters():
+                # [修复] 建议也去掉 "foogd." 前缀，或者在客户端对应处理
+                # 但为了简单，这里我们让 Model 和 FOOGD 分开处理
+                # 这里保持加前缀区分，或者干脆用两个字典返回
+                # 鉴于你的架构，最简单的是给 Model 去掉前缀
                 global_params[f"foogd.{name}"] = param.data.clone()
-                
+
         return global_params
 
     def set_global_parameters(self, params):
         """设置全局参数"""
         with torch.no_grad():
             for name, param in self.global_model.named_parameters():
-                key = f"model.{name}"
-                if 'head_p' not in name and key in params:
-                    param.data.copy_(params[key])
-            
+                # [修复] 直接使用 name，不再加 "model." 前缀
+                if 'head_p' not in name and name in params:
+                    param.data.copy_(params[name])
+
             if self.foogd_module:
                 for name, param in self.foogd_module.named_parameters():
                     key = f"foogd.{name}"
