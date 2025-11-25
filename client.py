@@ -12,6 +12,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import copy
 import torchvision.transforms as transforms
+# 引入 amp
+from torch.cuda.amp import autocast, GradScaler
 
 
 class FLClient:
@@ -63,6 +65,9 @@ class FLClient:
         # 反归一化参数 (用于傅里叶增强)
         self.mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1).to(self.device)
         self.std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1).to(self.device)
+
+        # [新增] 初始化 GradScaler
+        self.scaler = GradScaler()
 
     def _fourier_augmentation(self, images, beta=None):
         """
@@ -137,50 +142,57 @@ class FLClient:
             for batch_idx, (data, targets) in enumerate(self.train_loader):
                 data, targets = data.to(self.device), targets.to(self.device)
 
-                # 1. 数据增强 (仅使用傅里叶增强)
-                data_aug = self._apply_hybrid_augmentation(data)
-
-                # 2. 前向传播
-                logits_g, logits_p, features = self.model(data)
-                _, _, features_aug = self.model(data_aug)
-
-                # 3. 特征归一化 (防止 KSD 爆炸的关键)
-                features_norm = F.normalize(features, p=2, dim=1)
-                features_aug_norm = F.normalize(features_aug, p=2, dim=1)
-
-                # 4. 计算分类损失
-                loss_g = F.cross_entropy(logits_g, targets)
-                loss_p = F.cross_entropy(logits_p, targets)
-                classification_loss = loss_g + loss_p
-
-                # 5. 计算 FOOGD 损失
-                foogd_loss = torch.tensor(0.0).to(self.device)
-                ksd_loss_val = 0.0
-                sm_loss_val = 0.0
-                
-                if self.foogd_module:
-                    ksd_loss, sm_loss, _ = self.foogd_module(features_norm, features_aug_norm)
-                    # [关键调整] 降低权重，防止主导训练
-                    # 建议先设得很小，跑通分类再说
-                    foogd_loss = self.lambda_ksd * ksd_loss + self.lambda_sm * sm_loss
-                    
-                    ksd_loss_val = ksd_loss.item()
-                    sm_loss_val = sm_loss.item()
-
-                # 总损失
-                total_batch_loss = classification_loss + foogd_loss
-
-                # 6. 反向传播与梯度裁剪
                 self.optimizer.zero_grad()
-                total_batch_loss.backward()
-                
-                # [新增] 梯度裁剪：防止 NaN 的核武器
-                # max_norm 通常设为 1.0 或 5.0
+
+                # [修改] 使用 autocast 上下文管理器
+                with autocast():
+                    # 1. 数据增强 (仅使用傅里叶增强)
+                    data_aug = self._apply_hybrid_augmentation(data)
+
+                    # 2. 前向传播
+                    logits_g, logits_p, features = self.model(data)
+                    # 提示：如果你的显存足够，这里也可以计算增强数据的 logits
+                    _, _, features_aug = self.model(data_aug)
+
+                    # 3. 特征归一化 (防止 KSD 爆炸的关键)
+                    features_norm = F.normalize(features, p=2, dim=1)
+                    features_aug_norm = F.normalize(features_aug, p=2, dim=1)
+
+                    # 4. 计算分类损失
+                    loss_g = F.cross_entropy(logits_g, targets)
+                    loss_p = F.cross_entropy(logits_p, targets)
+                    classification_loss = loss_g + loss_p
+
+                    # 5. 计算 FOOGD 损失 (所有计算都在 autocast 下进行)
+                    foogd_loss = torch.tensor(0.0).to(self.device)
+                    ksd_loss_val = 0.0
+                    sm_loss_val = 0.0
+
+                    if self.foogd_module:
+                        # 注意：features 需要是 FP32 还是 FP16 取决于实现，通常 autocast 会自动处理
+                        # 但如果出现数值不稳定，可以在这里暂时退出 autocast
+                        ksd_loss, sm_loss, _ = self.foogd_module(features_norm, features_aug_norm)
+                        # [关键调整] 降低权重，防止主导训练
+                        # 建议先设得很小，跑通分类再说
+                        foogd_loss = self.lambda_ksd * ksd_loss + self.lambda_sm * sm_loss
+
+                        ksd_loss_val = ksd_loss.item()
+                        sm_loss_val = sm_loss.item()
+
+                    # 总损失
+                    total_batch_loss = classification_loss + foogd_loss
+
+                # [修改] 使用 scaler 进行反向传播和步进
+                self.scaler.scale(total_batch_loss).backward()
+
+                # 梯度裁剪 (Unscale 之后才能裁剪)
+                self.scaler.unscale_(self.optimizer)
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=5.0)
                 if self.foogd_module:
                     torch.nn.utils.clip_grad_norm_(self.foogd_module.parameters(), max_norm=5.0)
-                
-                self.optimizer.step()
+
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
 
                 # 记录数据
                 batch_size = data.size(0)
@@ -203,46 +215,25 @@ class FLClient:
         return generic_params, avg_loss
 
     def get_generic_parameters(self):
-        """
-        获取通用参数（服务器聚合的部分）
+        """获取通用参数 - 修复版"""
+        # 直接返回整个模型的 state_dict (包含 BN stats)
+        # 注意：FedRoD 理论上只聚合 Generic Head，但 backbone 的 BN 必须聚合
+        # 简单起见，我们可以返回整个 backbone + head_g
 
-        Returns:
-            generic_params: 通用参数状态字典
-        """
-        generic_params = {}
+        # 提取 backbone 和 head_g
+        params = {}
+        full_state = self.model.state_dict()
 
-        # 1. 获取骨干网络和通用头的参数
-        for name, param in self.model.named_parameters():
-            if 'head_p' not in name:  # 排除个性化头
-                generic_params[name] = param.data.clone()
+        for key, value in full_state.items():
+            if 'head_p' not in key: # 排除个性化头
+                params[key] = value.clone()
 
-        # 2. 获取 FOOGD 参数 (如果有)
-        if self.foogd_module:
-            for name, param in self.foogd_module.named_parameters():
-                generic_params[f"foogd.{name}"] = param.data.clone()
-
-        return generic_params
+        return params
 
     def set_generic_parameters(self, generic_params):
-        """
-        设置通用参数（从服务器接收）
-
-        Args:
-            generic_params: 通用参数状态字典
-        """
-        with torch.no_grad():
-            # 1. 加载模型参数
-            for name, param in self.model.named_parameters():
-                # [修复] 直接匹配 name
-                if 'head_p' not in name and name in generic_params:
-                    param.data.copy_(generic_params[name])
-
-            # 2. 加载 FOOGD 参数 (如果有)
-            if self.foogd_module:
-                for name, param in self.foogd_module.named_parameters():
-                    key = f"foogd.{name}"
-                    if key in generic_params:
-                        param.data.copy_(generic_params[key])
+        """设置通用参数 - 修复版"""
+        # 使用 load_state_dict (strict=False 允许忽略 head_p)
+        self.model.load_state_dict(generic_params, strict=False)
 
     def evaluate(self, test_loader):
         """

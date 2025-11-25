@@ -17,66 +17,36 @@ class FLServer:
             self.foogd_module.to(device)
 
     def get_global_parameters(self):
-        """获取全局参数 (Model + FOOGD)"""
-        global_params = {}
-        # 1. Model Params
-        for name, param in self.global_model.named_parameters():
-            if 'head_p' not in name:
-                # [修复] 去掉 "model." 前缀，直接使用 name
-                global_params[name] = param.data.clone()
-
-        # 2. FOOGD Params
-        if self.foogd_module:
-            for name, param in self.foogd_module.named_parameters():
-                # [修复] 建议也去掉 "foogd." 前缀，或者在客户端对应处理
-                # 但为了简单，这里我们让 Model 和 FOOGD 分开处理
-                # 这里保持加前缀区分，或者干脆用两个字典返回
-                # 鉴于你的架构，最简单的是给 Model 去掉前缀
-                global_params[f"foogd.{name}"] = param.data.clone()
-
-        return global_params
+        """获取全局参数 (Model + FOOGD) - 修复版"""
+        # 使用 state_dict 获取所有参数（包括 BN 统计量）
+        return self.global_model.state_dict()
 
     def set_global_parameters(self, params):
-        """设置全局参数"""
-        with torch.no_grad():
-            for name, param in self.global_model.named_parameters():
-                # [修复] 直接使用 name，不再加 "model." 前缀
-                if 'head_p' not in name and name in params:
-                    param.data.copy_(params[name])
-
-            if self.foogd_module:
-                for name, param in self.foogd_module.named_parameters():
-                    key = f"foogd.{name}"
-                    if key in params:
-                        param.data.copy_(params[key])
+        """设置全局参数 - 修复版"""
+        self.global_model.load_state_dict(params, strict=False)
 
     def aggregate(self, updates, sample_sizes):
-        """
-        聚合客户端更新 (FedAvg 加权平均)
-        
-        Args:
-            updates: 客户端参数更新列表
-            sample_sizes: 客户端样本数量列表
-            
-        Returns:
-            aggregated_params: 聚合后的全局参数
-        """
+        """聚合 - 修复版"""
         total_samples = sum(sample_sizes)
-        
-        # 以第一个客户端的更新为模板初始化
+        # 初始化聚合参数
         aggregated_params = copy.deepcopy(updates[0])
-        
-        # 清零，准备累加
-        for name in aggregated_params:
-            aggregated_params[name] = torch.zeros_like(aggregated_params[name])
-            
-        # 加权累加
-        for update, n_samples in zip(updates, sample_sizes):
-            weight = n_samples / total_samples
-            for name, param in update.items():
-                if name in aggregated_params:
-                    aggregated_params[name] += param * weight
-                    
+
+        for key in aggregated_params.keys():
+            # 针对 LongTensor (如 num_batches_tracked) 需要特殊处理或忽略
+            if 'num_batches_tracked' in key:
+                # 这种统计量通常取第一个客户端的即可，或者取最大值
+                continue
+
+            aggregated_params[key] = torch.zeros_like(aggregated_params[key], dtype=torch.float)
+
+            for update, n_samples in zip(updates, sample_sizes):
+                weight = n_samples / total_samples
+                # 确保数据类型一致
+                param_data = update[key]
+                if param_data.dtype != torch.float:
+                    param_data = param_data.float()
+                aggregated_params[key] += param_data * weight
+
         return aggregated_params
 
     def _compute_ood_scores(self, data_loader):

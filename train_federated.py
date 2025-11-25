@@ -370,4 +370,7 @@ def main():
 
 
 if __name__ == "__main__":
+    # [新增] 开启 cudnn benchmark
+    torch.backends.cudnn.benchmark = True
+
     main()
