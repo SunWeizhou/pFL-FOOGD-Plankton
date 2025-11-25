@@ -317,7 +317,9 @@ class FLClient:
                 _, _, features = self.model(data)
 
                 if self.foogd_module:
-                    _, _, ood_scores = self.foogd_module(features)
+                    # [修复] 必须先归一化，与训练时保持一致！
+                    features_norm = F.normalize(features, p=2, dim=1)
+                    _, _, ood_scores = self.foogd_module(features_norm)
                 else:
                     # 如果没有FOOGD模块，使用特征范数作为OOD分数
                     ood_scores = torch.norm(features, dim=1)
