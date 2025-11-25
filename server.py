@@ -22,8 +22,37 @@ class FLServer:
         return self.global_model.state_dict()
 
     def set_global_parameters(self, params):
-        """设置全局参数 - 修复版"""
-        self.global_model.load_state_dict(params, strict=False)
+        """设置全局参数 - 修复版：支持带前缀的参数拆解"""
+
+        # 1. 初始化两个空字典
+        model_params = {}
+        foogd_params = {}
+
+        # 2. 遍历聚合后的参数，根据前缀拆分
+        for key, value in params.items():
+            if key.startswith("model."):
+                # 去掉 "model." 前缀，还原为模型能识别的键名
+                new_key = key.replace("model.", "")
+                model_params[new_key] = value
+            elif key.startswith("foogd."):
+                # 去掉 "foogd." 前缀
+                new_key = key.replace("foogd.", "")
+                foogd_params[new_key] = value
+            else:
+                # 兼容旧逻辑（如果某个参数没有前缀，尝试直接归类给model）
+                model_params[key] = value
+
+        # 3. 加载主模型参数
+        # strict=False 仍然很重要，以防有些缓冲变量不匹配，但核心权重现在能对上了
+        self.global_model.load_state_dict(model_params, strict=False)
+
+        # 4. 加载 FOOGD 参数 [关键修复点]
+        if self.foogd_module and foogd_params:
+            self.foogd_module.load_state_dict(foogd_params, strict=False)
+
+        print(f"  [Server] Updated Global Model with {len(model_params)} params")
+        if self.foogd_module:
+             print(f"  [Server] Updated FOOGD Module with {len(foogd_params)} params")
 
     def aggregate(self, updates, sample_sizes):
         """聚合 - 修复版"""

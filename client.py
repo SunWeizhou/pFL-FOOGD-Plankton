@@ -263,7 +263,7 @@ class FLClient:
         # 加载参数
         self.model.load_state_dict(model_params, strict=False)
         if self.foogd_module and foogd_params:
-            self.foogd_module.load_state_dict(foogd_params)
+            self.foogd_module.load_state_dict(foogd_params, strict=False)
 
     def evaluate(self, test_loader):
         """
