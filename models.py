@@ -266,8 +266,9 @@ class FOOGD_Module(nn.Module):
         return ksd
 
     def forward(self, features, features_aug=None):
-        # 1. OOD Score (测试用) - 使用负范数
-        ood_scores = -torch.norm(self.score_model(features), dim=1)
+        # 1. OOD Score (测试用) - 使用正范数作为异常分数 (Anomaly Score)
+        # 范数越大 -> 梯度越大 -> 密度越低 -> 越可能是 OOD
+        ood_scores = torch.norm(self.score_model(features), dim=1)
 
         # 2. SM Loss (训练 Score Model)
         sm_loss = self.compute_sm3d_loss(features)
