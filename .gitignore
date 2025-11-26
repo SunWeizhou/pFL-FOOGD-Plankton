@@ -1,15 +1,16 @@
 # 数据文件
 Plankton_OOD_Dataset/
 data/
+DYB-PlanktonNet/
+DYB-PlanktonNetV1.1.zip
 *.pth
 *.pkl
 *.h5
 *.npy
 
-DYB-PlanktonNet/
-
 # 实验输出
 experiments/
+experiments_foogd_5.0/
 test_evaluation/
 
 # Python
