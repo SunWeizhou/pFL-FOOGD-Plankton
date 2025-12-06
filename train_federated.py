@@ -132,6 +132,9 @@ def federated_training(args):
         'far_auroc': []
     }
 
+    # [新增] 记录历史最优准确率
+    best_acc = 0.0
+
     # 联邦学习训练循环
     print(f"\n开始联邦学习训练，共 {args.communication_rounds} 轮...")
 
@@ -217,6 +220,20 @@ def federated_training(args):
             print(f"  [Clients] Average Head-P ID准确率: {avg_acc_p:.4f} (这是个性化性能的关键指标!)")
             print(f"  [Clients] Average Head-G ID准确率: {avg_acc_g_local:.4f}")
 
+            # [新增] 保存历史最优模型 (Best Model)
+            current_acc = test_metrics['id_accuracy']
+            if current_acc > best_acc:
+                best_acc = current_acc
+                best_model_path = os.path.join(experiment_dir, "best_model.pth")
+                torch.save({
+                    'round': round_num + 1,
+                    'global_model_state_dict': server.global_model.state_dict(),
+                    'foogd_state_dict': foogd_module.state_dict() if foogd_module else None,
+                    'best_acc': best_acc,
+                    'config': vars(args)
+                }, best_model_path)
+                print(f"  ★ 发现新最优模型 (Acc: {best_acc:.4f})，已保存: {best_model_path}")
+
             # 原有记录逻辑保持不变
             training_history['train_losses'].append(round_train_loss / len(selected_clients))
             training_history['test_losses'].append(test_metrics['id_loss'])
@@ -277,7 +294,27 @@ def federated_training(args):
     # 绘制训练曲线
     plot_training_curves(training_history, experiment_dir)
 
-    print("\n正在生成详细评估报告(混淆矩阵 & OOD 分类图)...")
+    print("\n正在准备生成详细评估报告...")
+
+    # [新增关键逻辑]：加载历史最优模型 (Best Model)
+    # 这样生成的混淆矩阵和 OOD 图才是该实验能达到的"上限"性能
+    best_model_path = os.path.join(experiment_dir, "best_model.pth")
+
+    if os.path.exists(best_model_path):
+        print(f"★ 正在加载历史最优模型进行评估: {best_model_path}")
+        checkpoint = torch.load(best_model_path)
+
+        # 加载参数
+        server.global_model.load_state_dict(checkpoint['global_model_state_dict'])
+        if foogd_module and checkpoint['foogd_state_dict']:
+            foogd_module.load_state_dict(checkpoint['foogd_state_dict'])
+
+        print(f"  已恢复到第 {checkpoint['round']} 轮的状态 (Acc: {checkpoint['best_acc']:.4f})")
+    else:
+        print("  未找到最优模型检查点，将使用最终轮次模型进行评估（这可能不是最佳性能）。")
+
+    # 原有的生成报告代码
+    print("正在生成详细评估报告(混淆矩阵 & OOD 分类图)...")
     eval_output_dir = os.path.join(experiment_dir, "final_evaluation")
     generate_evaluation_report(
         model = server.global_model,
@@ -365,7 +402,7 @@ def main():
     parser.add_argument('--model_type', type=str, default='densenet169',
                        choices=['densenet121', 'densenet169'],
                        help='骨干网络类型')
-    parser.add_argument('--use_foogd', action='store_true', default=True,
+    parser.add_argument('--use_foogd', action='store_true', default=False,
                        help='是否使用FOOGD模块')
     parser.add_argument('--image_size', type=int, default=224,
                        help='输入图像尺寸')
