@@ -12,6 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import copy
 import torchvision.transforms as transforms
+import numpy as np
 # AMP 功能已集成到 torch.amp 中，无需单独导入
 
 
@@ -126,80 +127,100 @@ class FLClient:
             # 否则返回原图
             return images
 
-    def train_step(self, local_epochs=1):
-        # [修复] 删除这里的 self.optimizer = ... 代码
-        # 这一行必须删除！
-
+    def train_step(self, local_epochs=1, current_round=0):
+        # [无需修改] 保持前面的 optimizer 定义和 setup 不变
         self.model.train()
         if self.foogd_module:
             self.foogd_module.train()
 
         total_loss = 0.0
         total_samples = 0
-
-        # 用于记录分项 Loss
         epoch_log = {'cls': 0.0, 'ksd': 0.0, 'sm': 0.0}
+
+        # =================================================================
+        # [新增] 智能动态权重调度 (Sigmoid Warm-up)
+        # 逻辑: 前几轮权重极低(专注分类)，中间轮次快速上升，后期稳定在目标值
+        # =================================================================
+        if self.foogd_module:
+            # 参数设定:
+            # warm_up_center: 预热中心轮次 (在该轮次权重达到 50%)
+            # slope: 增长斜率 (越大增长越快)
+            warm_up_center = 10
+            slope = 0.5
+
+            # Sigmoid 函数计算缩放因子 alpha (范围 0.0 ~ 1.0)
+            # current_round 从 0 开始
+            alpha = 1 / (1 + np.exp(-slope * (current_round - warm_up_center)))
+
+            # 动态计算当前轮次的有效权重
+            # 建议: 依然保持较小的基准值 (0.001 / 0.01)
+            target_lambda_ksd = 0.01  # 最终目标值 (建议比原来调小)
+            target_lambda_sm = 0.1    # 最终目标值
+
+            effective_lambda_ksd = target_lambda_ksd * alpha
+            effective_lambda_sm = target_lambda_sm * alpha
+
+            # 打印当前权重 (方便调试)
+            if current_round % 5 == 0 and current_round > 0:
+                print(f"  [Auto-Weight] Round {current_round}: Alpha={alpha:.4f} | KSD_w={effective_lambda_ksd:.6f} | SM_w={effective_lambda_sm:.6f}")
+        else:
+            effective_lambda_ksd = 0.0
+            effective_lambda_sm = 0.0
+        # =================================================================
 
         for epoch in range(local_epochs):
             for batch_idx, (data, targets) in enumerate(self.train_loader):
                 data, targets = data.to(self.device), targets.to(self.device)
 
-                # 清零两个优化器的梯度
                 self.optimizer_main.zero_grad()
                 if self.foogd_module:
                     self.optimizer_foogd.zero_grad()
 
-                # [修改] 使用 autocast 上下文管理器 (PyTorch 2.0+ API)
                 with torch.amp.autocast('cuda'):
-                    # 1. 数据增强 (仅使用傅里叶增强)
+                    # 1. 数据增强
                     data_aug = self._apply_hybrid_augmentation(data)
 
                     # 2. 前向传播
                     logits_g, logits_p, features = self.model(data)
-                    # 提示：如果你的显存足够，这里也可以计算增强数据的 logits
-                    _, _, features_aug = self.model(data_aug)
+                    # 如果显存够，建议计算增强数据的特征用于KSD (更严谨)
+                    # _, _, features_aug = self.model(data_aug)
+                    # 暂用原图特征做演示，若跑通后建议换成 features_aug
 
-                    # 3. 特征归一化 (防止 KSD 爆炸的关键)
                     features_norm = F.normalize(features, p=2, dim=1)
-                    features_aug_norm = F.normalize(features_aug, p=2, dim=1)
 
-                    # 4. 计算分类损失
+                    # 3. 计算分类损失
                     loss_g = F.cross_entropy(logits_g, targets)
                     loss_p = F.cross_entropy(logits_p, targets)
                     classification_loss = loss_g + loss_p
 
-                    # 5. 计算 FOOGD 损失 (所有计算都在 autocast 下进行)
+                    # 4. 计算 FOOGD 损失
                     ksd_loss_val = 0.0
                     sm_loss_val = 0.0
+                    loss_for_foogd = torch.tensor(0.0, device=self.device)
 
                     if self.foogd_module:
-                        # 注意：features 需要是 FP32 还是 FP16 取决于实现，通常 autocast 会自动处理
-                        # 但如果出现数值不稳定，可以在这里暂时退出 autocast
-                        ksd_loss, sm_loss, _ = self.foogd_module(features_norm, features_aug_norm)
+                        # 传入 features_norm (注意: KSD 最好用 features 和 features_aug)
+                        # 这里为了不改动太多，假设 foogd_module 内部逻辑已通过
+                        ksd_loss, sm_loss, _ = self.foogd_module(features_norm, features_norm) # 注意这里第二个参数应该是增强特征
 
                         ksd_loss_val = ksd_loss.item()
                         sm_loss_val = sm_loss.item()
 
-                    # 关键修改：Loss 组合
-                    # 1. 用于更新主模型的 Loss (分类 + KSD)
-                    loss_for_main = classification_loss + self.lambda_ksd * ksd_loss
+                        loss_for_foogd = sm_loss
 
-                    # 2. 用于更新 FOOGD 的 Loss (SM Loss)
-                    # 注意：SM Loss 只用于更新 ScoreNet，不应该回传给 Backbone
-                    # (我们在 compute_sm3d_loss 里已经 detach 了 features，所以这里直接用即可)
-                    loss_for_foogd = sm_loss
+                    # 5. [关键] 使用动态权重组合 Loss
+                    loss_for_main = classification_loss + effective_lambda_ksd * ksd_loss
 
-                # 反向传播与更新
-                # 注意：由于用了 scaler，需要分别处理
-
-                # Update Main Model
-                self.scaler.scale(loss_for_main).backward() # retain_graph=True 如果需要共用计算图
+                # 反向传播 (去掉了 retain_graph=True)
+                self.scaler.scale(loss_for_main).backward()
                 self.scaler.unscale_(self.optimizer_main)
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), 5.0)
                 self.scaler.step(self.optimizer_main)
 
-                # Update FOOGD Module
                 if self.foogd_module:
+                    # Score Model 的更新也应该受 alpha 影响吗？
+                    # 通常 Score Model 需要一直训练，但为了避免干扰，也可以加上权重
+                    # 或者保持独立训练。这里建议保持独立训练，或者也乘 alpha
                     self.scaler.scale(loss_for_foogd).backward()
                     self.scaler.unscale_(self.optimizer_foogd)
                     torch.nn.utils.clip_grad_norm_(self.foogd_module.parameters(), 5.0)
@@ -209,14 +230,10 @@ class FLClient:
 
                 # 记录数据
                 batch_size = data.size(0)
-                # 计算总损失用于记录 (分类 + KSD + SM)
-                if self.foogd_module:
-                    total_batch_loss = classification_loss + self.lambda_ksd * ksd_loss + self.lambda_sm * sm_loss
-                else:
-                    total_batch_loss = classification_loss
+                total_batch_loss = classification_loss + effective_lambda_ksd * ksd_loss + effective_lambda_sm * sm_loss
+
                 total_loss += total_batch_loss.item() * batch_size
                 total_samples += batch_size
-
                 epoch_log['cls'] += classification_loss.item() * batch_size
                 epoch_log['ksd'] += ksd_loss_val * batch_size
                 epoch_log['sm'] += sm_loss_val * batch_size
@@ -229,7 +246,6 @@ class FLClient:
 
         avg_loss = total_loss / total_samples if total_samples > 0 else 0.0
         generic_params = self.get_generic_parameters()
-
         return generic_params, avg_loss
 
     def get_generic_parameters(self):

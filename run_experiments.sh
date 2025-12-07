@@ -11,7 +11,7 @@ N_CLIENTS=5
 ROUNDS=50
 EPOCHS=1
 BATCH_SIZE=64
-MODEL="densenet169"     # 如果显存充足可改为 densenet169
+MODEL="densenet121"     # 使用densenet121以节省显存
 SEED=2025               # 固定随机种子，确保所有实验的数据划分完全一致！
 
 # 创建日志目录

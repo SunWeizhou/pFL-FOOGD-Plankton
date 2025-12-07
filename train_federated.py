@@ -216,8 +216,11 @@ def federated_training(args):
             # 设置客户端模型参数
             client.set_generic_parameters(server.get_global_parameters())
 
-            # 客户端本地训练
-            client_update, client_loss = client.train_step(local_epochs=args.local_epochs)
+            # 客户端本地训练 (传入当前轮次用于动态权重调度)
+            client_update, client_loss = client.train_step(
+                local_epochs=args.local_epochs,
+                current_round=round_num  # 新增参数：当前轮次
+            )
 
             client_updates.append(client_update)
             client_sample_sizes.append(len(client.train_loader.dataset))
@@ -238,9 +241,9 @@ def federated_training(args):
             print("\n评估模型...")
 
             # 1. Server Global Model 评估
+            # [修复] 取消每5轮一次的限制，改为每轮都评估，确保数据长度一致
             test_metrics = server.evaluate_global_model(
-                test_loader, near_ood_loader, far_ood_loader,
-                inc_loader if ((round_num + 1) % 5 == 0) else None # [优化] IN-C 每5轮测一次，省时间
+                test_loader, near_ood_loader, far_ood_loader, inc_loader
             )
 
             # 2. [关键修复 2] 方案 B：严谨的本地测试集评估
