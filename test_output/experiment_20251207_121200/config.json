@@ -1,0 +1,18 @@
+{
+  "data_root": "./Plankton_OOD_Dataset",
+  "n_clients": 2,
+  "alpha": 5.0,
+  "communication_rounds": 2,
+  "local_epochs": 1,
+  "batch_size": 8,
+  "client_fraction": 1.0,
+  "model_type": "densenet121",
+  "use_foogd": false,
+  "image_size": 224,
+  "eval_frequency": 1,
+  "save_frequency": 2,
+  "device": "cuda",
+  "output_dir": "./test_output",
+  "seed": 42,
+  "resume": false
+}

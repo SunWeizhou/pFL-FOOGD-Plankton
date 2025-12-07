@@ -43,7 +43,7 @@ class FLClient:
         # 1. 主模型优化器 (Backbone + Classifiers) -> 使用 SGD
         self.optimizer_main = torch.optim.SGD(
             self.model.parameters(),
-            lr=0.01,
+            lr=0.001,  # 降低学习率，避免DenseNet-121训练震荡
             momentum=0.9,
             weight_decay=1e-5
         )
@@ -197,6 +197,9 @@ class FLClient:
                     ksd_loss_val = 0.0
                     sm_loss_val = 0.0
                     loss_for_foogd = torch.tensor(0.0, device=self.device)
+                    # 初始化ksd_loss和sm_loss为零张量
+                    ksd_loss = torch.tensor(0.0, device=self.device)
+                    sm_loss = torch.tensor(0.0, device=self.device)
 
                     if self.foogd_module:
                         # 传入 features_norm (注意: KSD 最好用 features 和 features_aug)

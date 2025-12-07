@@ -61,9 +61,9 @@ run_experiment() {
     fi
 
     # 执行命令并保存日志
-    # 2>&1 | tee ... 会同时在屏幕显示和写入文件，方便你实时查看进度
+    # 使用 tee 同时在屏幕显示和写入文件，方便实时查看进度
     echo "执行命令: $CMD"
-    $CMD > "logs/${EXP_NAME}.log" 2>&1
+    $CMD 2>&1 | tee "logs/${EXP_NAME}.log"
 
     echo ">>> 实验 $EXP_NAME 完成！"
 }
