@@ -1,0 +1,5 @@
+# Anthropic/claude-code API variables (project-local). Keep this file private and DO NOT commit.
+export ANTHROPIC_BASE_URL="https://api.deepseek.com/anthropic"
+export ANTHROPIC_AUTH_TOKEN="sk-6ff49c99c73a4a1584bf5969b6183023"
+export ANTHROPIC_MODEL="deepseek-chat"
+export ANTHROPIC_SMALL_FAST_MODEL="deepseek-chat"
