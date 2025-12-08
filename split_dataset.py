@@ -87,13 +87,12 @@ def split_dataset():
 
     # 创建输出目录
     path_id_train = OUTPUT_PATH / "D_ID_train"
-    path_id_val = OUTPUT_PATH / "D_ID_val"
     path_id_test = OUTPUT_PATH / "D_ID_test"
     path_near_test = OUTPUT_PATH / "D_Near_test"
     path_far_test = OUTPUT_PATH / "D_Far_test"
 
     # 创建所有目标文件夹
-    for path in [path_id_train, path_id_val, path_id_test, path_near_test, path_far_test]:
+    for path in [path_id_train, path_id_test, path_near_test, path_far_test]:
         path.mkdir(parents=True, exist_ok=True)
 
     print("Target folders created")
@@ -125,10 +124,10 @@ def split_dataset():
 
     print("Near-OOD and Far-OOD data processing completed")
 
-    # 处理 ID 数据（9:1 拆分，验证集合并到训练集）
-    print("\nProcessing ID data (9:1 split, validation merged into training)...")
+    # 处理 ID 数据（9:1 拆分，无验证集）
+    print("\nProcessing ID data (9:1 split, no validation set)...")
 
-    total_images = {'train': 0, 'val': 0, 'test': 0}
+    total_images = {'train': 0, 'test': 0}
 
     for class_name in ID_CLASSES:
         print(f"  处理 ID: {class_name}")
@@ -147,30 +146,27 @@ def split_dataset():
         # 打乱文件列表
         random.shuffle(all_files)
 
-        # 计算拆分点
+        # 计算拆分点：90%训练，10%测试
         n_total = len(all_files)
         n_train = int(n_total * 0.9)  # 90% 训练
-        n_val = 0                     # 0% 验证 (或者保留极少量)
         n_test = n_total - n_train    # 10% 测试
 
         # 拆分文件列表
         train_files = all_files[:n_train]
-        val_files = []  # 验证集为空
-        test_files = all_files[n_train:]  # 简化索引，因为 n_val = 0
+        test_files = all_files[n_train:]
 
         # 创建目标子文件夹
         train_dest_dir = path_id_train / class_name
-        val_dest_dir = path_id_val / class_name
         test_dest_dir = path_id_test / class_name
 
-        for dir_path in [train_dest_dir, val_dest_dir, test_dest_dir]:
+        for dir_path in [train_dest_dir, test_dest_dir]:
             dir_path.mkdir(exist_ok=True)
 
         # 复制文件
         for file_list, dest_dir, split_name in zip(
-            [train_files, val_files, test_files],
-            [train_dest_dir, val_dest_dir, test_dest_dir],
-            ['train', 'val', 'test']
+            [train_files, test_files],
+            [train_dest_dir, test_dest_dir],
+            ['train', 'test']
         ):
             for filename in file_list:
                 source_file = source_dir / filename
@@ -189,7 +185,6 @@ def split_dataset():
     # 统计每个目录的信息
     datasets_info = {
         "D_ID_train": path_id_train,
-        "D_ID_val": path_id_val,
         "D_ID_test": path_id_test,
         "D_Near_test": path_near_test,
         "D_Far_test": path_far_test

@@ -55,6 +55,8 @@ import copy # 确保引入 copy
 def create_clients(n_clients, model_template, foogd_template, client_loaders, device, model_type='densenet169', compute_aug_features=True, freeze_bn=True):
     """创建客户端 (修正版)"""
     clients = []
+    # 注意：compute_aug_features 和 freeze_bn 参数目前未被使用
+    # 但为了保持与调用代码的兼容性而保留
 
     for client_id in range(n_clients):
         # 1. 深拷贝模型 (Model)

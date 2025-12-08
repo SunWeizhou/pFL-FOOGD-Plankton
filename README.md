@@ -56,9 +56,10 @@ python split_dataset.py
 
 ```
 ./data/
-    ├── ID_images/           # 54个类别 (Train/Val/Test)
-    ├── OOD_Near/            # 26个类别 (仅测试)
-    └── OOD_Far/             # 12个类别 (仅测试)
+    ├── D_ID_train/          # 54个类别 (90% ID数据用于训练)
+    ├── D_ID_test/           # 54个类别 (10% ID数据用于测试)
+    ├── D_Near_test/         # 26个Near-OOD类别 (仅测试)
+    └── D_Far_test/          # 12个Far-OOD类别 (仅测试)
 ```
 
 ### 3. 测试系统组件
@@ -111,7 +112,7 @@ python train_federated.py \
 
 根据项目工作文档的严格类别定义：
 
-- **ID Classes (54个)**: 目标标签 (0-53)，用于训练(80%)、验证(10%)、测试(10%)
+- **ID Classes (54个)**: 目标标签 (0-53)，用于训练(90%)、测试(10%)
 - **Near-OOD Classes (26个)**: 仅用于测试（OOD评估）
 - **Far-OOD Classes (12个)**: 仅用于测试（OOD评估）
 

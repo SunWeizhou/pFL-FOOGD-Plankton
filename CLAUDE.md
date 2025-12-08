@@ -101,7 +101,7 @@ Key parameters:
 ### Data Structure and Categories
 
 #### Strict Category Definitions (defined in `data_utils.py`)
-- **ID Classes (54)**: Target labels for training/validation/testing (80/10/10 split)
+- **ID Classes (54)**: Target labels for training/testing (90/10 split)
   - Includes plankton species like Polychaeta types, Acartia sp., Calanoid types, etc.
   - Used for model training and in-distribution evaluation
 - **Near-OOD Classes (26)**: Only for testing (OOD evaluation)
@@ -114,22 +114,20 @@ Key parameters:
 #### Dataset Directory Structure
 ```
 ./data/
-    ├── ID_images/           # 54 classes (Train/Val/Test)
-    │   ├── train/           # 80% of ID data
-    │   ├── val/             # 10% of ID data
-    │   └── test/            # 10% of ID data
-    ├── OOD_Near/            # 26 classes (Test only)
-    └── OOD_Far/             # 12 classes (Test only)
+    ├── D_ID_train/          # 54 classes (90% of ID data for training)
+    ├── D_ID_test/           # 54 classes (10% of ID data for testing)
+    ├── D_Near_test/         # 26 Near-OOD classes (Test only)
+    └── D_Far_test/          # 12 Far-OOD classes (Test only)
 ```
 
 #### Data Preparation
 ```bash
-# Run dataset splitting script (creates train/val/test splits)
+# Run dataset splitting script (creates train/test splits)
 python split_dataset.py
 
 # The script will:
 # 1. Create proper directory structure
-# 2. Split ID classes into 80/10/10 train/val/test
+# 2. Split ID classes into 90/10 train/test (无验证集)
 # 3. Copy Near-OOD and Far-OOD classes to test directories
 ```
 

@@ -69,8 +69,6 @@ class PlanktonDataset(Dataset):
         # ============================================================
         if mode == 'train':
             data_dir = os.path.join(root_dir, 'D_ID_train')
-        elif mode == 'val':
-            data_dir = os.path.join(root_dir, 'D_ID_val')
         elif mode == 'test':
             data_dir = os.path.join(root_dir, 'D_ID_test')
         elif mode == 'near_ood':
@@ -117,7 +115,7 @@ class PlanktonDataset(Dataset):
 
                     # 确定标签
                     current_label = -1
-                    if mode in ['train', 'val', 'test']:
+                    if mode in ['train', 'test']:
                         if dir_name in self.class_to_idx:
                             current_label = self.class_to_idx[dir_name]
                         else:
@@ -169,7 +167,7 @@ def get_transforms(image_size=224):
 
     Returns:
         train_transform: 训练集变换
-        val_transform: 验证集变换
+        test_transform: 测试集变换
     """
     # 训练集变换 - 包含数据增强
     train_transform = transforms.Compose([
@@ -181,14 +179,14 @@ def get_transforms(image_size=224):
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
 
-    # 验证集变换 - 不包含数据增强
-    val_transform = transforms.Compose([
+    # 测试集变换 - 不包含数据增强
+    test_transform = transforms.Compose([
         transforms.Resize((image_size, image_size)),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
 
-    return train_transform, val_transform
+    return train_transform, test_transform
 
 
 def partition_data(dataset, n_clients=10, alpha=0.1):
@@ -258,7 +256,7 @@ def create_federated_loaders(data_root, n_clients=10, alpha=0.1, batch_size=32, 
         far_ood_loader: Far-OOD数据加载器
         inc_loader: IN-C (域泛化) 数据加载器
     """
-    train_transform, val_transform = get_transforms(image_size)
+    train_transform, test_transform = get_transforms(image_size)
 
     # 创建训练数据集
     train_dataset = PlanktonDataset(data_root, transform=train_transform, mode='train')
@@ -283,9 +281,9 @@ def create_federated_loaders(data_root, n_clients=10, alpha=0.1, batch_size=32, 
         print(f"客户端 {client_id}: {len(client_dataset)} 样本")
 
     # 创建测试和OOD数据加载器
-    test_dataset = PlanktonDataset(data_root, transform=val_transform, mode='test')
-    near_ood_dataset = PlanktonDataset(data_root, transform=val_transform, mode='near_ood')
-    far_ood_dataset = PlanktonDataset(data_root, transform=val_transform, mode='far_ood')
+    test_dataset = PlanktonDataset(data_root, transform=test_transform, mode='test')
+    near_ood_dataset = PlanktonDataset(data_root, transform=test_transform, mode='near_ood')
+    far_ood_dataset = PlanktonDataset(data_root, transform=test_transform, mode='far_ood')
 
     test_loader = DataLoader(
         test_dataset,
