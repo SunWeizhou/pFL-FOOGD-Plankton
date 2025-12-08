@@ -15,7 +15,7 @@ import torchvision.transforms as transforms
 class FLClient:
     """联邦学习客户端"""
 
-    def __init__(self, client_id, model, foogd_module, train_loader, device, compute_aug_features=True, freeze_bn=True):
+    def __init__(self, client_id, model, foogd_module, train_loader, device, compute_aug_features=True, freeze_bn=True, base_lr=0.001):
         self.client_id = client_id
         self.model = model
         self.foogd_module = foogd_module
@@ -23,11 +23,12 @@ class FLClient:
         self.device = device
         self.compute_aug_features = compute_aug_features
         self.freeze_bn = freeze_bn
+        self.base_lr = base_lr  # 基础学习率，可根据 batch_size 调整
 
-        # [修正1] 学习率改为 0.001 (适配 DenseNet)
+        # 1. 在初始化时定义优化器 (只做一次)
         self.optimizer_main = torch.optim.SGD(
             self.model.parameters(),
-            lr=0.001,
+            lr=self.base_lr,  # 使用传入的基础学习率
             momentum=0.9,
             weight_decay=1e-5
         )
@@ -84,28 +85,21 @@ class FLClient:
     # [修正2] 接收 current_round 参数并实现 Sigmoid Warm-up
     def train_step(self, local_epochs=1, current_round=0):
         # =================================================================
-        # 【修正 1】: 每次接收全局模型后，必须重置优化器！
-        # 否则上一轮的 Momentum 会作用在这一轮的新参数上，导致严重震荡。
+        # 【优化】: 不再每次重新创建优化器，只调整学习率
+        # 这样可以保留优化器的状态（如 momentum），同时确保学习率正确
         # =================================================================
-        current_lr = self.optimizer_main.param_groups[0]['lr']  # 保持当前的 LR
-        self.optimizer_main = torch.optim.SGD(
-            self.model.parameters(),
-            lr=current_lr,
-            momentum=0.9,
-            weight_decay=1e-5
-        )
+        # 3. 动态调整学习率 (可选，但推荐)
+        # 这是一个小技巧：虽然不重置优化器，但我们要确保学习率是正确的
+        # 如果你有 decay 逻辑，可以在这里重新赋值 lr
+        target_lr = self.base_lr  # 使用基础学习率
+        # 建议：如果 Batch=64, 这里可以尝试 0.01 或保持 0.001
+        for param_group in self.optimizer_main.param_groups:
+            param_group['lr'] = target_lr
 
-        # 注意：如果你之前使用了 self.optimizer_main.state = collections.defaultdict(dict)
-        # 请确保你在文件头部 import collections，否则会报错。
-        # 重新实例化是最稳妥的方法。
-
-        # 如果有FOOGD模块，也重置其优化器
+        # 如果有FOOGD模块，也调整其学习率
         if self.foogd_module:
-            self.optimizer_foogd = torch.optim.Adam(
-                self.foogd_module.parameters(),
-                lr=1e-3,
-                betas=(0.9, 0.999)
-            )
+            for param_group in self.optimizer_foogd.param_groups:
+                param_group['lr'] = 1e-3
 
         self.model.train()
         if self.foogd_module:

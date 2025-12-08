@@ -3,8 +3,6 @@ import torch.nn as nn
 import copy
 import numpy as np
 from typing import List, Dict, Any
-# 引入评估工具函数
-from eval_utils import evaluate_id_performance, evaluate_ood_detection
 
 class FLServer:
     # 修改初始化，接收 foogd_module
@@ -96,73 +94,116 @@ class FLServer:
 
         return aggregated_params
 
-    def _compute_ood_scores(self, data_loader):
+    def _compute_scores_and_metrics(self, data_loader):
         """
-        修正：使用 Score Model 计算真正的 OOD 分数
+        [优化] 一次性计算 Loss, Accuracy 和 OOD Score
+        避免重复前向传播
         """
         self.global_model.eval()
         if self.foogd_module:
             self.foogd_module.eval()
 
+        total_loss = 0.0
+        total_samples = 0
+        all_preds = []
+        all_targets = []
         all_scores = []
 
-        with torch.no_grad():
-            for data, _ in data_loader:
-                data = data.to(self.device)
-                _, _, features = self.global_model(data)
+        import torch.nn.functional as F
 
+        with torch.no_grad():
+            for data, targets in data_loader:
+                data, targets = data.to(self.device), targets.to(self.device)
+
+                # 1. 前向传播 (Backbone + Heads)
+                logits_g, _, features = self.global_model(data)
+
+                # 2. 计算分类指标（仅当标签有效时）
+                # OOD数据的标签为-1，跳过损失和准确率计算
+                valid_mask = targets >= 0
+                if valid_mask.any():
+                    valid_targets = targets[valid_mask]
+                    valid_logits = logits_g[valid_mask]
+
+                    loss = F.cross_entropy(valid_logits, valid_targets)
+                    total_loss += loss.item() * valid_targets.size(0)
+                    total_samples += valid_targets.size(0)
+
+                    _, preds = torch.max(valid_logits, 1)
+                    all_preds.extend(preds.cpu().numpy())
+                    all_targets.extend(valid_targets.cpu().numpy())
+
+                # 3. 计算 OOD Score (FOOGD) - 对所有样本都计算
                 if self.foogd_module:
-                    # [修正] 必须先归一化，与训练时保持一致！
                     features_norm = F.normalize(features, p=2, dim=1)
-                    # 使用归一化后的特征计算分数
                     _, _, scores = self.foogd_module(features_norm)
                 else:
-                    # 退化：使用特征范数
                     scores = torch.norm(features, dim=1)
-                    
                 all_scores.extend(scores.cpu().numpy())
 
-        return np.array(all_scores)
+        # 整理结果
+        avg_loss = total_loss / total_samples if total_samples > 0 else 0.0
+
+        # 处理空数组情况
+        if len(all_preds) > 0 and len(all_targets) > 0:
+            accuracy = np.mean(np.array(all_preds) == np.array(all_targets))
+        else:
+            accuracy = 0.0  # 没有有效标签时，准确率为0
+
+        return {
+            'loss': avg_loss,
+            'accuracy': accuracy,
+            'scores': np.array(all_scores),
+            'targets': np.array(all_targets) # 保留targets以防未来需要
+        }
 
     def evaluate_global_model(self, test_loader, near_ood_loader, far_ood_loader, inc_loader=None):
         """
-        评估全局模型性能
-        新增 inc_loader 参数用于测试 OOD 泛化能力
+        [优化版] 评估全局模型性能 - 消除冗余计算
         """
-        self.global_model.eval()
-        if self.foogd_module:
-            self.foogd_module.eval()
-            
         metrics = {}
+        print("  正在评估 Global Model (优化版)...")
 
-        # 1. 评估 ID (Clean) 准确率
-        print("  评估 ID (Clean) ...")
-        # 注意：这里需要传入 device
-        id_metrics = evaluate_id_performance(self.global_model, test_loader, self.device)
-        metrics['id_accuracy'] = id_metrics['accuracy']
-        # 如果 evaluate_id_performance 没有返回 loss，这里设为 0 或自己计算
-        metrics['id_loss'] = id_metrics['loss']
+        # 1. 计算 ID (Clean) 的所有指标 [只跑一次!]
+        # 这包含了 Accuracy, Loss, 和用于 OOD 对比的 ID Scores
+        id_results = self._compute_scores_and_metrics(test_loader)
 
-        # 2. [新增] 评估 IN-C (Corrupted) 准确率 -> 验证 SAG 效果
+        metrics['id_accuracy'] = id_results['accuracy']
+        metrics['id_loss'] = id_results['loss']
+        id_scores = id_results['scores'] # 缓存下来，后面复用！
+
+        print(f"    -> ID Acc: {metrics['id_accuracy']:.4f}")
+
+        # 2. 评估 IN-C (如果存在)
         if inc_loader:
-            print("  评估 IN-C (OOD Generalization) ...")
-            inc_metrics = evaluate_id_performance(self.global_model, inc_loader, self.device)
-            metrics['inc_accuracy'] = inc_metrics['accuracy']
+            inc_results = self._compute_scores_and_metrics(inc_loader)
+            metrics['inc_accuracy'] = inc_results['accuracy']
+            print(f"    -> IN-C Acc: {metrics['inc_accuracy']:.4f}")
 
-        # 3. 评估 OOD 检测 (Near & Far) -> 验证 SM3D 效果
+        # 3. 评估 OOD 检测 (复用 id_scores)
+        from sklearn.metrics import roc_auc_score
+
+        # 辅助函数：计算 AUROC
+        def compute_auroc(id_s, ood_s):
+            y_true = np.concatenate([np.zeros_like(id_s), np.ones_like(ood_s)])
+            y_scores = np.concatenate([id_s, ood_s])
+            return roc_auc_score(y_true, y_scores)
+
+        # Near-OOD
         if near_ood_loader:
-            print("  评估 Near-OOD 检测 ...")
-            near_metrics = evaluate_ood_detection(
-                self.global_model, self.foogd_module, test_loader, near_ood_loader, self.device
-            )
-            metrics['near_auroc'] = near_metrics['auroc']
-            
+            # 只需跑 Near-OOD 的前向传播
+            near_results = self._compute_scores_and_metrics(near_ood_loader)
+            near_scores = near_results['scores']
+            metrics['near_auroc'] = compute_auroc(id_scores, near_scores)
+            print(f"    -> Near AUROC: {metrics['near_auroc']:.4f}")
+
+        # Far-OOD
         if far_ood_loader:
-            print("  评估 Far-OOD 检测 ...")
-            far_metrics = evaluate_ood_detection(
-                self.global_model, self.foogd_module, test_loader, far_ood_loader, self.device
-            )
-            metrics['far_auroc'] = far_metrics['auroc']
+            # 只需跑 Far-OOD 的前向传播
+            far_results = self._compute_scores_and_metrics(far_ood_loader)
+            far_scores = far_results['scores']
+            metrics['far_auroc'] = compute_auroc(id_scores, far_scores)
+            print(f"    -> Far AUROC: {metrics['far_auroc']:.4f}")
 
         return metrics
 

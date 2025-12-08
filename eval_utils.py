@@ -46,18 +46,23 @@ def evaluate_id_performance(model, data_loader, device, num_classes=54):
 
             logits_g, logits_p, _ = model(data)
 
-# 计算 Loss (和 client.py 保持一致，取平均或只看 head_g)
-            loss = F.cross_entropy(logits_g, targets) 
-            total_loss += loss.item() * data.size(0)
-            total_samples += data.size(0)
+            # 计算 Loss (和 client.py 保持一致，取平均或只看 head_g)
+            # 只对有效标签（>=0）计算损失
+            valid_mask = targets >= 0
+            if valid_mask.any():
+                valid_targets = targets[valid_mask]
+                valid_logits_g = logits_g[valid_mask]
+                loss = F.cross_entropy(valid_logits_g, valid_targets)
+                total_loss += loss.item() * valid_targets.size(0)
+                total_samples += valid_targets.size(0)
 
-            # 使用通用头进行预测
-            _, preds = torch.max(logits_g, 1)
+                # 使用通用头进行预测
+                _, preds = torch.max(valid_logits_g, 1)
 
-            all_preds.extend(preds.cpu().numpy())
-            all_targets.extend(targets.cpu().numpy())
-            all_logits_g.extend(logits_g.cpu().numpy())
-            all_logits_p.extend(logits_p.cpu().numpy())
+                all_preds.extend(preds.cpu().numpy())
+                all_targets.extend(valid_targets.cpu().numpy())
+                all_logits_g.extend(valid_logits_g.cpu().numpy())
+                all_logits_p.extend(logits_p[valid_mask].cpu().numpy())
 
     all_preds = np.array(all_preds)
     all_targets = np.array(all_targets)

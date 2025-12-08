@@ -52,7 +52,7 @@ def setup_experiment(args):
 
 import copy # 确保引入 copy
 
-def create_clients(n_clients, model_template, foogd_template, client_loaders, device, model_type='densenet169', compute_aug_features=True, freeze_bn=True):
+def create_clients(n_clients, model_template, foogd_template, client_loaders, device, model_type='densenet169', compute_aug_features=True, freeze_bn=True, base_lr=0.001):
     """创建客户端 (修正版)"""
     clients = []
     # 注意：compute_aug_features 和 freeze_bn 参数目前未被使用
@@ -82,7 +82,8 @@ def create_clients(n_clients, model_template, foogd_template, client_loaders, de
             train_loader=client_loaders[client_id],
             device=device,
             compute_aug_features=compute_aug_features,
-            freeze_bn=freeze_bn
+            freeze_bn=freeze_bn,
+            base_lr=base_lr  # 传递基础学习率
         )
         clients.append(client)
 
@@ -167,7 +168,8 @@ def federated_training(args):
     clients = create_clients(
         args.n_clients, global_model, foogd_module, client_loaders, device, args.model_type,
         compute_aug_features=args.compute_aug_features,
-        freeze_bn=args.freeze_bn
+        freeze_bn=args.freeze_bn,
+        base_lr=args.base_lr if hasattr(args, 'base_lr') else 0.001  # 使用参数或默认值
     )
 
     # [关键修复 1] 如果有检查点，恢复每个 Client 的 Head-P
@@ -496,9 +498,9 @@ def main():
 
     # 评估和保存
     parser.add_argument('--eval_frequency', type=int, default=1,
-                       help='评估频率（轮次）')
-    parser.add_argument('--save_frequency', type=int, default=2,
-                       help='保存检查点频率（轮次）')
+                       help='评估频率（轮次）--eval_frequency 1：务必保持。这样你会得到 100 个数据点，曲线会非常完整、细腻。')
+    parser.add_argument('--save_frequency', type=int, default=10,
+                       help='保存检查点频率（轮次）--save_frequency 10：建议设置。每 10 轮存一个档够用了，防止意外断电能恢复就行，同时节省硬盘空间。')
 
     # 系统参数
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu',
@@ -512,6 +514,8 @@ def main():
                        help='是否计算增强数据的特征（显存不足时可设为False）')
     parser.add_argument('--freeze_bn', action='store_true', default=True,
                        help='是否冻结BN统计量（默认True，使用预训练ImageNet统计量）')
+    parser.add_argument('--base_lr', type=float, default=0.001,
+                       help='基础学习率（默认0.001，batch_size=64时可尝试0.01）')
 
     args = parser.parse_args()
 
@@ -528,27 +532,58 @@ def main():
 
     # 打印最终结果
     print("\n=== 训练完成 ===")
+
+    # 确保 training_history 存在且包含必要数据
+    if not training_history or 'test_accuracies' not in training_history:
+        print("警告: 训练历史数据不完整")
+        return
+
+    # 全局准确率
     if training_history['test_accuracies']:
         final_acc = training_history['test_accuracies'][-1]
         print(f"最终全局准确率 (Head-G): {final_acc:.4f}")
+    else:
+        print("警告: 未找到全局准确率数据")
+        final_acc = 0.0
 
+    # 个性化准确率
     if 'avg_person_acc' in training_history and training_history['avg_person_acc']:
         final_person_acc = training_history['avg_person_acc'][-1]
         print(f"最终个性化准确率 (Head-P): {final_person_acc:.4f}")
-        print(f"个性化增益: {final_person_acc - final_acc:.4f}")
+        if final_acc > 0:
+            print(f"个性化增益: {final_person_acc - final_acc:.4f}")
+    else:
+        print("提示: 未计算个性化准确率 (可能未启用相关评估)")
 
-    if training_history['inc_accuracies']:
+    # IN-C准确率 (OOD泛化)
+    if 'inc_accuracies' in training_history and training_history['inc_accuracies']:
         final_inc_acc = training_history['inc_accuracies'][-1]
         print(f"最终IN-C准确率: {final_inc_acc:.4f}")
-        print(f"泛化性能下降: {final_acc - final_inc_acc:.4f}")
+        if final_acc > 0:
+            print(f"泛化性能下降: {final_acc - final_inc_acc:.4f}")
+    else:
+        print("提示: 未计算IN-C准确率 (可能未提供IN-C数据)")
 
-    if training_history['near_auroc']:
+    # Near-OOD检测
+    if 'near_auroc' in training_history and training_history['near_auroc']:
         final_near_auroc = training_history['near_auroc'][-1]
         print(f"最终Near-OOD AUROC: {final_near_auroc:.4f}")
+    else:
+        print("提示: 未计算Near-OOD AUROC (可能未提供Near-OOD数据)")
 
-    if training_history['far_auroc']:
+    # Far-OOD检测
+    if 'far_auroc' in training_history and training_history['far_auroc']:
         final_far_auroc = training_history['far_auroc'][-1]
         print(f"最终Far-OOD AUROC: {final_far_auroc:.4f}")
+    else:
+        print("提示: 未计算Far-OOD AUROC (可能未提供Far-OOD数据)")
+
+    # 数据点统计
+    print(f"\n数据点统计:")
+    print(f"  总通信轮次: {len(training_history['rounds']) if 'rounds' in training_history else 0}")
+    print(f"  评估频率: 每 {args.eval_frequency} 轮评估一次")
+    print(f"  保存频率: 每 {args.save_frequency} 轮保存一次检查点")
+    print(f"  曲线数据点: {len(training_history['test_accuracies']) if training_history['test_accuracies'] else 0} 个")
 
 
 if __name__ == "__main__":
