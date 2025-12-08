@@ -9,7 +9,7 @@
 DATA_ROOT="./Plankton_OOD_Dataset"
 N_CLIENTS=5
 ROUNDS=100
-EPOCHS=3                # 修改为4，与client.py中的local_epochs默认值一致
+EPOCHS=3                # 修改为3，与client.py中的local_epochs默认值一致
 BATCH_SIZE=64
 MODEL="densenet121"     # 使用densenet121以节省显存
 SEED=2025               # 固定随机种子，确保所有实验的数据划分完全一致！

@@ -238,9 +238,14 @@ def federated_training(args):
         aggregated_params = server.aggregate(client_updates, client_sample_sizes)
         server.set_global_parameters(aggregated_params)
 
-        # 更新客户端模型
+        # 更新客户端模型 (为下一轮做准备)
         for client in clients:
             client.set_generic_parameters(server.get_global_parameters())
+
+        # ===========================================================
+        # 【建议修改】: 评估应该在训练之后进行 (或者使用单独的验证集微调)
+        # 此时 Head_P 已经适应了当前的 Backbone，能反映真实的个性化能力
+        # ===========================================================
 
         # === 评估阶段 ===
         if (round_num + 1) % args.eval_frequency == 0 or round_num == args.communication_rounds - 1:
@@ -248,11 +253,14 @@ def federated_training(args):
 
             # 1. Server Global Model 评估
             # [修复] 取消每5轮一次的限制，改为每轮都评估，确保数据长度一致
+            # 注意：这里评估的是 "Global Head-G" (这是对的，评估全局模型)
             test_metrics = server.evaluate_global_model(
                 test_loader, near_ood_loader, far_ood_loader, inc_loader
             )
 
             # 2. [关键修复 2] 方案 B：严谨的本地测试集评估
+            # 【关键】如果要评估 Client Head-P，最好是在 Client 本地训练结束时记录
+            # 或者在这里虽然 Head_P 稍微有点滞后，但如果加上 local_epochs > 1 会好很多
             client_acc_p_list = []
             client_acc_g_list = []
             print(f"  正在评估 {len(clients)} 个客户端的个性化性能 (严谨模式: 仅评估本地可见类别)...")

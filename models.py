@@ -161,13 +161,36 @@ class FOOGD_Module(nn.Module):
         self.feature_dim = feature_dim
         self.score_model = ScoreModel(feature_dim)
 
-    def rbf_kernel_matrix(self, X, Y, sigma=None):
-        """计算RBF核矩阵 K(X, Y)"""
-        if sigma is None:
+    def rbf_kernel_matrix(self, X, Y, sigma=None, sq_dist=None):
+        """
+        计算 RBF 核矩阵 K(X, Y)
+
+        Args:
+            X, Y: 输入特征
+            sigma: 核带宽 (如果为 None 则使用中位数启发式)
+            sq_dist: [可选] 预先计算好的距离平方矩阵 ||X-Y||^2
+                     如果提供了这个，就不会重复计算 cdist
+        """
+        # 1. 如果没有提供预计算距离，则现场计算
+        if sq_dist is None:
+            # cdist 计算的是欧氏距离 ||x-y||
             dists = torch.cdist(X, Y)
+            sq_dist = dists ** 2
+        else:
+            # 如果有了平方距离，开根号得到欧氏距离 (用于计算 sigma)
+            dists = torch.sqrt(torch.clamp(sq_dist, min=1e-8))
+
+        # 2. 计算 Sigma (中位数启发式)
+        if sigma is None:
             sigma = torch.median(dists).detach()
+
+        # 3. 计算核矩阵
+        # K(x,y) = exp(- ||x-y||^2 / (2 * sigma^2))
         gamma = 1.0 / (2 * sigma**2 + 1e-8)
-        K_XY = torch.exp(-gamma * torch.cdist(X, Y)**2)
+
+        # 直接使用 sq_dist
+        K_XY = torch.exp(-gamma * sq_dist)
+
         return K_XY, sigma
 
     def langevin_dynamic_sampling(self, batch_size, device, step_size=0.01, n_steps=10):
@@ -223,51 +246,43 @@ class FOOGD_Module(nn.Module):
 
     def compute_ksd_loss(self, z, z_aug):
         """
-        修正版：计算 KSD(p(z), q(z_aug))
-        目标：优化 Feature Extractor，使得 z_aug 落在 p(z) 的高密度区域
+        优化版：只计算一次距离矩阵
         """
-
-        # 1. 关键修改：操作对象必须是【增强特征 z_aug】
-        features = z_aug 
-
-        # 2. Score Model 作为 Critic，不需要更新它，所以 detach
-        # 但它需要对 features (z_aug) 进行打分
-        # 注意：论文 Eq. 11 中 s_theta(z_hat) 是 score function
+        # 1. 准备数据
+        features = z_aug
         scores = self.score_model(features).detach()
+        batch_size = features.size(0)
 
-        #    3. 计算 Kernel (在增强特征之间计算)
-        # features (即 z_aug) 需要保留梯度，以便反向传播更新 Backbone
-        K_xx, sigma = self.rbf_kernel_matrix(features, features)
+        # 2. 【关键优化】先计算差分向量和距离平方
+        # X_diff: (x_i - x_j) -> [B, B, Dim]
+        # 显存优化提示：如果 batch_size 很大，这里可能会 OOM，可以考虑切片处理
+        X_diff = features.unsqueeze(1) - features.unsqueeze(0)
 
-        # --- 以下计算逻辑保持不变，但现在的 'features' 和 'scores' 对应的是 z_aug ---
+        # sq_dist: ||x_i - x_j||^2 -> [B, B]
+        sq_dist = torch.sum(X_diff**2, dim=2)
+
+        # 3. 调用核函数 (传入预先计算的 sq_dist)
+        K_xx, sigma = self.rbf_kernel_matrix(features, features, sq_dist=sq_dist)
+
+        # --- 以下计算逻辑保持不变，但利用了已有的变量 ---
 
         # Term 1: s(x)^T s(x') * k(x,x')
         term1 = torch.matmul(scores, scores.t()) * K_xx
 
-        # 辅助变量: (x_i - x_j)
-        # [B, B, Dim]
-        X_diff = features.unsqueeze(1) - features.unsqueeze(0)
-
-        # 修正后的 Term 2
-        # scores: [Batch(i), Dim(d)] -> 'id'
-        # X_diff: [Batch(i), Batch(j), Dim(d)] -> 'ijd'
-        # 结果: [Batch(i), Batch(j)] -> 'ij'
-        # 物理含义: 计算当前样本 i 的 score 与差向量 (x_i - x_j) 的点积
+        # Term 2: s(x)^T * (x - x') ...
+        # 注意：grad_x' k(x,x') = 1/sigma^2 * (x - x') * k
+        # scores: [B, D], X_diff: [B, B, D] -> einsum -> [B, B]
         term2 = torch.einsum('id, ijd -> ij', scores, X_diff) * K_xx / (sigma**2 + 1e-8)
 
-        # 修正后的 Term 3
-        # scores: [Batch(j), Dim(d)] -> 'jd' (注意这里取的是 j，代表对方样本)
-        # X_diff: [Batch(i), Batch(j), Dim(d)] -> 'ijd'
-        # 结果: [Batch(i), Batch(j)] -> 'ij'
-        # 物理含义: 计算对方样本 j 的 score 与差向量 (x_i - x_j) 的点积
+        # Term 3: s(x')^T * (x' - x) ... (注意正负号)
         term3 = -torch.einsum('jd, ijd -> ij', scores, X_diff) * K_xx / (sigma**2 + 1e-8)
-    
-        # Term 4: trace(grad_x grad_x' k)
+
+        # Term 4: trace term
         dim = features.size(1)
-        sq_dist = torch.sum(X_diff**2, dim=2)
+        # 这里直接复用 sq_dist，不需要重新 sum(X_diff**2)
         term4 = (dim / (sigma**2) - sq_dist / (sigma**4)) * K_xx
-        
-        # 最终取平均
+
+        # 最终 Loss
         ksd = (term1 + term2 + term3 + term4).mean()
 
         return ksd

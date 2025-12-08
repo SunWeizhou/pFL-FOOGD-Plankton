@@ -83,16 +83,21 @@ class FLClient:
 
     # [修正2] 接收 current_round 参数并实现 Sigmoid Warm-up
     def train_step(self, local_epochs=1, current_round=0):
-        # 【新增修正】: 每次接收全局模型后，必须重置优化器状态，特别是动量！
-        # 否则上一轮的动量会作用在这一轮的新参数上，导致严重震荡
-        # 简单粗暴地重新初始化 optimizer (推荐这种，比较稳妥)
-        current_lr = self.optimizer_main.param_groups[0]['lr']
+        # =================================================================
+        # 【修正 1】: 每次接收全局模型后，必须重置优化器！
+        # 否则上一轮的 Momentum 会作用在这一轮的新参数上，导致严重震荡。
+        # =================================================================
+        current_lr = self.optimizer_main.param_groups[0]['lr']  # 保持当前的 LR
         self.optimizer_main = torch.optim.SGD(
             self.model.parameters(),
             lr=current_lr,
             momentum=0.9,
             weight_decay=1e-5
         )
+
+        # 注意：如果你之前使用了 self.optimizer_main.state = collections.defaultdict(dict)
+        # 请确保你在文件头部 import collections，否则会报错。
+        # 重新实例化是最稳妥的方法。
 
         # 如果有FOOGD模块，也重置其优化器
         if self.foogd_module:
