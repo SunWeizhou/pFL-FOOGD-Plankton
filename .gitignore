@@ -5,13 +5,18 @@ DYB-PlanktonNet/
 DYB-PlanktonNetV1.1.zip
 
 # 实验输出（大文件，不上传）
-experiments/
+# 注意：我们会上传实验结果图片和配置文件，但不上传大模型文件
+experiments/*/*.pth
+experiments/*/*.pt
+experiments/*/*.bin
+experiments/*/checkpoints/
+experiments/*/logs/
 experiments_foogd_5.0/
 experiments_5.0/
 test_evaluation/
 test_output/
 test_experiments/
-visualizations/
+# visualizations/  # 这个文件夹我们会保留并上传
 
 # 模型检查点和数据文件（大文件，不上传）
 *.pth
