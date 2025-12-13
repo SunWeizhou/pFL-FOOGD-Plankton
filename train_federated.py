@@ -242,6 +242,11 @@ def federated_training(args):
             'test_losses': [],
             'near_auroc': [],
             'far_auroc': [],
+            # 新增的全面评估指标
+            'avg_person_acc_comprehensive': [],  # 新的全面评估的 ID 准确率
+            'avg_person_inc_acc': [],            # Head-P 在 IN-C 上的准确率
+            'avg_person_near_auroc': [],         # Head-P 在 Near-OOD 上的 AUROC
+            'avg_person_far_auroc': [],          # Head-P 在 Far-OOD 上的 AUROC
             'best_acc': 0.0
         }
 
@@ -329,6 +334,48 @@ def federated_training(args):
             avg_acc_p = sum(client_acc_p_list) / len(client_acc_p_list) if client_acc_p_list else 0.0
             avg_acc_g_local = sum(client_acc_g_list) / len(client_acc_g_list) if client_acc_g_list else 0.0
 
+            # === 2. 增强版：客户端个性化评估 ===
+            print(f"  正在全面评估 {len(clients)} 个客户端的个性化性能 (Head-P)...")
+
+            # 初始化列表
+            p_acc_id_list = []
+            p_acc_inc_list = []
+            p_auroc_near_list = []
+            p_auroc_far_list = []
+
+            for i, client in enumerate(clients):
+                # 获取 ID 数据加载器 (已有的本地子集)
+                loader_id = client_test_loaders[i]
+                if loader_id is None:
+                    continue
+
+                # 调用新写的全能评估
+                # 注意：inc_loader, near_ood_loader, far_ood_loader 是全局的，直接传
+                # 这样做虽然有点慢（每个客户端都跑一遍全量 OOD），但对于写论文出数据是最稳妥的
+                c_metrics = client.evaluate_comprehensive(
+                    loader_id, inc_loader, near_ood_loader, far_ood_loader
+                )
+
+                p_acc_id_list.append(c_metrics.get('acc_p_id', 0))
+                if 'acc_p_inc' in c_metrics:
+                    p_acc_inc_list.append(c_metrics['acc_p_inc'])
+                if 'auroc_p_near' in c_metrics:
+                    p_auroc_near_list.append(c_metrics['auroc_p_near'])
+                if 'auroc_p_far' in c_metrics:
+                    p_auroc_far_list.append(c_metrics['auroc_p_far'])
+
+            # 计算平均值
+            avg_p_id = sum(p_acc_id_list) / len(p_acc_id_list) if p_acc_id_list else 0
+            avg_p_inc = sum(p_acc_inc_list) / len(p_acc_inc_list) if p_acc_inc_list else 0
+            avg_p_near = sum(p_auroc_near_list) / len(p_auroc_near_list) if p_auroc_near_list else 0
+            avg_p_far = sum(p_auroc_far_list) / len(p_auroc_far_list) if p_auroc_far_list else 0
+
+            # 打印结果
+            print(f"  [Clients] Avg Head-P ID Acc:   {avg_p_id:.4f}")
+            print(f"  [Clients] Avg Head-P IN-C Acc: {avg_p_inc:.4f}")
+            print(f"  [Clients] Avg Head-P Near AUROC: {avg_p_near:.4f}")
+            print(f"  [Clients] Avg Head-P Far AUROC:  {avg_p_far:.4f}")
+
             # 3. 记录日志 (确保写入 history)
             training_history['rounds'].append(round_num + 1)
             training_history['test_accuracies'].append(test_metrics['id_accuracy'])
@@ -336,6 +383,11 @@ def federated_training(args):
             training_history['avg_global_local_acc'].append(avg_acc_g_local)
             training_history['train_losses'].append(round_train_loss / len(selected_clients))
             training_history['test_losses'].append(test_metrics['id_loss'])
+            # 新增的全面评估指标
+            training_history['avg_person_acc_comprehensive'].append(avg_p_id)
+            training_history['avg_person_inc_acc'].append(avg_p_inc)
+            training_history['avg_person_near_auroc'].append(avg_p_near)
+            training_history['avg_person_far_auroc'].append(avg_p_far)
 
             if 'near_auroc' in test_metrics:
                 training_history['near_auroc'].append(test_metrics['near_auroc'])

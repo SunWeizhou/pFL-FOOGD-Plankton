@@ -11,6 +11,7 @@ import copy
 import collections
 import numpy as np  # 必须导入 numpy
 import torchvision.transforms as transforms
+from sklearn.metrics import roc_auc_score
 
 class FLClient:
     """联邦学习客户端"""
@@ -302,6 +303,106 @@ class FLClient:
                 all_labels.extend(targets.cpu().numpy())
 
         return all_ood_scores, all_labels
+
+    def evaluate_comprehensive(self, id_loader, inc_loader, near_ood_loader, far_ood_loader):
+        """
+        [新增] 全面评估 Head-P 的性能 (ID, IN-C, Near, Far)
+        """
+        self.model.eval()
+        if self.foogd_module:
+            self.foogd_module.eval()
+
+        metrics = {}
+
+        # 1. 评估 ID Accuracy (Head-P)
+        # -------------------------------------------------
+        correct_p = 0
+        total_id = 0
+        id_scores = []  # 缓存 ID 数据的 OOD 分数，用于后续计算 AUROC
+
+        with torch.no_grad():
+            for data, targets in id_loader:
+                data, targets = data.to(self.device), targets.to(self.device)
+                logits_g, logits_p, features = self.model(data)
+
+                # 计算 Acc
+                _, pred_p = torch.max(logits_p, 1)
+                correct_p += (pred_p == targets).sum().item()
+                total_id += data.size(0)
+
+                # 计算 OOD Score (用于后续对比)
+                if self.foogd_module:
+                    features_norm = F.normalize(features, p=2, dim=1)
+                    _, _, scores = self.foogd_module(features_norm)
+                else:
+                    scores = torch.norm(features, dim=1)
+                id_scores.extend(scores.cpu().numpy())
+
+        metrics['acc_p_id'] = correct_p / total_id if total_id > 0 else 0.0
+
+        # 2. 评估 IN-C Accuracy (Head-P)
+        # -------------------------------------------------
+        # 注意：这里我们简化处理，直接用全量 IN-C 测试集。
+        # 严谨做法是像 ID 一样只测客户端见过的类别，但全量测更能反映真实泛化能力。
+        if inc_loader:
+            correct_p_inc = 0
+            total_inc = 0
+            with torch.no_grad():
+                for data, targets in inc_loader:
+                    data, targets = data.to(self.device), targets.to(self.device)
+                    _, logits_p, _ = self.model(data)
+
+                    # 只统计 ID 范围内的类别 (0-53)
+                    valid_mask = targets >= 0
+                    if valid_mask.any():
+                        v_data = data[valid_mask]
+                        v_targets = targets[valid_mask]
+                        v_logits = logits_p[valid_mask]
+
+                        _, pred_p = torch.max(v_logits, 1)
+                        correct_p_inc += (pred_p == v_targets).sum().item()
+                        total_inc += v_targets.size(0)
+
+            metrics['acc_p_inc'] = correct_p_inc / total_inc if total_inc > 0 else 0.0
+
+        # 3. 评估 OOD Detection (AUROC)
+        # -------------------------------------------------
+        # 辅助函数
+        def get_scores(loader):
+            s_list = []
+            with torch.no_grad():
+                for data, _ in loader:
+                    data = data.to(self.device)
+                    _, _, features = self.model(data)
+                    if self.foogd_module:
+                        features_norm = F.normalize(features, p=2, dim=1)
+                        _, _, s = self.foogd_module(features_norm)
+                    else:
+                        s = torch.norm(features, dim=1)
+                    s_list.extend(s.cpu().numpy())
+            return np.array(s_list)
+
+        id_scores = np.array(id_scores)
+
+        # Near-OOD
+        if near_ood_loader:
+            near_scores = get_scores(near_ood_loader)
+            # 标签：ID=0, OOD=1 (AUROC计算通常假设正例分数高，这里 FOOGD 分数 ID 高，所以反过来或者用 1-score)
+            # 修正：sklearn roc_auc_score: y_true, y_score.
+            # 如果 ID score 高 (norm大), OOD score 低.
+            # 设 ID=1, OOD=0, 则 AUROC 反映 score 区分度.
+            y_true = np.concatenate([np.ones_like(id_scores), np.zeros_like(near_scores)])
+            y_scores = np.concatenate([id_scores, near_scores])
+            metrics['auroc_p_near'] = roc_auc_score(y_true, y_scores)
+
+        # Far-OOD
+        if far_ood_loader:
+            far_scores = get_scores(far_ood_loader)
+            y_true = np.concatenate([np.ones_like(id_scores), np.zeros_like(far_scores)])
+            y_scores = np.concatenate([id_scores, far_scores])
+            metrics['auroc_p_far'] = roc_auc_score(y_true, y_scores)
+
+        return metrics
 
 
 if __name__ == "__main__":
