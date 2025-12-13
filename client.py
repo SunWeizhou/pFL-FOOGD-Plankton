@@ -15,7 +15,7 @@ import torchvision.transforms as transforms
 class FLClient:
     """联邦学习客户端"""
 
-    def __init__(self, client_id, model, foogd_module, train_loader, device, compute_aug_features=True, freeze_bn=True, base_lr=0.001):
+    def __init__(self, client_id, model, foogd_module, train_loader, device, compute_aug_features=True, freeze_bn=True, base_lr=0.001, algorithm='fedrod'):
         self.client_id = client_id
         self.model = model
         self.foogd_module = foogd_module
@@ -24,6 +24,7 @@ class FLClient:
         self.compute_aug_features = compute_aug_features
         self.freeze_bn = freeze_bn
         self.base_lr = base_lr  # 基础学习率，可根据 batch_size 调整
+        self.algorithm = algorithm  # 算法选择: 'fedavg' 或 'fedrod'
 
         # 1. 在初始化时定义优化器 (只做一次)
         self.optimizer_main = torch.optim.SGD(
@@ -155,7 +156,14 @@ class FLClient:
 
                     loss_g = F.cross_entropy(logits_g, targets)
                     loss_p = F.cross_entropy(logits_p, targets)
-                    classification_loss = loss_g + loss_p
+
+                    # 根据算法选择 Loss
+                    if self.algorithm == 'fedavg':
+                        # FedAvg 模式：只优化全局头，Head-P 不参与梯度回传
+                        classification_loss = loss_g
+                    else:
+                        # FedRoD 模式：双头共同优化 (默认逻辑)
+                        classification_loss = loss_g + loss_p
 
                     # [修复] 初始化所有损失变量
                     ksd_loss = torch.tensor(0.0, device=self.device)

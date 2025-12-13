@@ -1,50 +1,47 @@
 #!/bin/bash
 
 # ========================================================
-# pFL-FOOGD 自动化实验脚本 - GPU 0 (v2.1)
-# 运行前4个实验：极端差异(0.1)和真实强差异(0.5)的FOOGD和Baseline
+# pFL-FOOGD 全面基准测试 - GPU 0 (FedAvg系列)
+# 包含 6 组实验：
+# 1. FedAvg (Alpha 0.1, 0.5, 5.0)
+# 2. FedAvg + FOOGD (Alpha 0.1, 0.5, 5.0)
 # ========================================================
 
-# 设置使用显卡0
 export CUDA_VISIBLE_DEVICES=0
 
-# 1. 基础配置 (请根据服务器实际情况调整)
+# 基础配置
 DATA_ROOT="./Plankton_OOD_Dataset"
-N_CLIENTS=5
-ROUNDS=100
-EPOCHS=3                # 修改为3，与client.py中的local_epochs默认值一致
+N_CLIENTS=10
+ROUNDS=50
+EPOCHS=3
 BATCH_SIZE=64
-MODEL="densenet121"     # 使用densenet121以节省显存
-SEED=2025               # 固定随机种子，确保所有实验的数据划分完全一致！
+IMAGE_SIZE=299
+MODEL="densenet121"
+SEED=2025
 
 # 创建日志目录
-mkdir -p logs
+mkdir -p logs_benchmark
 
 echo "========================================================"
-echo "开始运行 pFL-FOOGD 实验组 - GPU 0 (共 4 组)"
+echo "开始运行 FedAvg 系列全面实验 - GPU 0 (共 6 组)"
+echo "Alpha设置: 0.1 (极端), 0.5 (真实), 5.0 (均匀)"
 echo "开始时间: $(date)"
-echo "随机种子: $SEED (保证数据划分一致性)"
-echo "使用显卡: GPU 0 (CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES)"
 echo "========================================================"
 
-# 定义单次实验运行函数
+# 定义实验运行函数
 run_experiment() {
     local ALPHA=$1
     local USE_FOOGD=$2
-    local EXP_NAME=$3
-    local DESC=$4
+    local ALGORITHM=$3
+    local EXP_NAME=$4
+    local DESC=$5
 
     echo ""
     echo "--------------------------------------------------------"
     echo "正在运行: $EXP_NAME"
-    echo "场景说明: $DESC"
-    echo "配置: Alpha=$ALPHA | Use FOOGD=$USE_FOOGD"
-    echo "使用显卡: GPU 0"
+    echo "场景: $DESC"
+    echo "配置: Alpha=$ALPHA | Algorithm=$ALGORITHM | FOOGD=$USE_FOOGD"
     echo "--------------------------------------------------------"
-
-    # 构建基础命令
-    # 注意：这里假设你已经修改了 train_federated.py，增加了 --seed 参数
-    IMG_SIZE=299
 
     CMD="python train_federated.py \
         --data_root $DATA_ROOT \
@@ -53,40 +50,35 @@ run_experiment() {
         --communication_rounds $ROUNDS \
         --local_epochs $EPOCHS \
         --batch_size $BATCH_SIZE \
-        --image_size $IMG_SIZE \
+        --image_size $IMAGE_SIZE \
         --model_type $MODEL \
         --seed $SEED \
-        --compute_aug_features \
-        --freeze_bn \
-        --output_dir ./experiments/$EXP_NAME"
+        --algorithm $ALGORITHM \
+        --output_dir ./experiments_benchmark/$EXP_NAME"
 
-    # 根据开关添加 --use_foogd 参数
-    # 注意：这里假设你已经将 train_federated.py 中 use_foogd 的 default 改为了 False
     if [ "$USE_FOOGD" = "true" ]; then
         CMD="$CMD --use_foogd"
     fi
 
-    # 执行命令并保存日志
-    # 使用 tee 同时在屏幕显示和写入文件，方便实时查看进度
-    echo "执行命令: $CMD"
-    $CMD 2>&1 | tee "logs/${EXP_NAME}.log"
-
-    echo ">>> 实验 $EXP_NAME 完成！"
+    # 运行并记录日志
+    $CMD 2>&1 | tee "logs_benchmark/${EXP_NAME}.log"
 }
 
-# ================= GPU 0 实验队列 (共4组) =================
+# =================== 实验队列 ===================
 
-# --- 第1组：极端差异 (Alpha=0.1) ---
-# 意义：模拟完全隔离的站点（如远海 vs 淡水），验证算法在恶劣条件下的鲁棒性下界。
-run_experiment 0.1 "true"  "alpha0.1_with_foogd" "极端异质性 (With FOOGD)"
-run_experiment 0.1 "false" "alpha0.1_no_foogd"   "极端异质性 (Baseline)"
+# --- 第一轮：Alpha = 0.1 (极端异质性) ---
+run_experiment 0.1 "false" "fedavg" "fedavg_alpha0.1" "FedAvg (Alpha=0.1)"
+run_experiment 0.1 "true"  "fedavg" "fedavg_foogd_alpha0.1" "FedAvg+FOOGD (Alpha=0.1)"
 
-# --- 第2组：真实强差异 (Alpha=0.5) [核心组] ---
-# 意义：模拟珠三角典型的盐度梯度差异，优势种不同但有少量重叠。这是最符合实际的场景。
-run_experiment 0.5 "true"  "alpha0.5_with_foogd" "真实强异质性 (With FOOGD)"
-run_experiment 0.5 "false" "alpha0.5_no_foogd"   "真实强异质性 (Baseline)"
+# --- 第二轮：Alpha = 0.5 (真实强异质性 - Sweet Spot) ---
+run_experiment 0.5 "false" "fedavg" "fedavg_alpha0.5" "FedAvg (Alpha=0.5)"
+run_experiment 0.5 "true"  "fedavg" "fedavg_foogd_alpha0.5" "FedAvg+FOOGD (Alpha=0.5)"
+
+# --- 第三轮：Alpha = 5.0 (中等/均匀分布) ---
+run_experiment 5.0 "false" "fedavg" "fedavg_alpha5.0" "FedAvg (Alpha=5.0)"
+run_experiment 5.0 "true"  "fedavg" "fedavg_foogd_alpha5.0" "FedAvg+FOOGD (Alpha=5.0)"
 
 echo "========================================================"
-echo "GPU 0 上的 4 组实验已全部完成！请检查 logs/ 目录下的日志文件。"
+echo "GPU 0 所有 6 组实验已完成！"
 echo "结束时间: $(date)"
 echo "========================================================"
