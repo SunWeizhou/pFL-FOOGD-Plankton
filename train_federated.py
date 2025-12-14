@@ -17,10 +17,10 @@ import json
 import random  # 确保导入 random
 
 from models import create_fedrod_model
-from data_utils import create_federated_loaders
+from data_utils import create_federated_loaders, build_taxonomy_matrix
 from client import FLClient
 from server import FLServer
-from eval_utils import generate_evaluation_report
+from eval_utils import generate_evaluation_report, get_tail_classes, evaluate_accuracy_metrics
 
 def set_seed(seed):
     """固定所有随机种子，确保实验可复现"""
@@ -31,6 +31,78 @@ def set_seed(seed):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     print(f"Random Seed set to: {seed}")
+
+
+def get_global_tail_classes(client_loaders, threshold_ratio=0.5):
+    """
+    通过聚合所有客户端的数据来统计全局长尾分布
+
+    Args:
+        client_loaders: 客户端DataLoader列表
+        threshold_ratio: 定义尾部的比例 (例如 0.5 表示样本数最少的 50% 类别)
+
+    Returns:
+        tail_classes_set: 包含尾部类别索引的集合
+    """
+    print("正在计算全局类别分布以定义尾部类别...")
+
+    # 检查空列表
+    if not client_loaders:
+        print("  警告: 客户端列表为空，返回空集合")
+        return set()
+
+    # 1. 初始化计数器
+    global_class_counts = {}
+
+    # 2. 遍历所有客户端
+    for client_id, loader in enumerate(client_loaders):
+        dataset = loader.dataset
+
+        # 处理 Subset 对象
+        if hasattr(dataset, 'indices') and hasattr(dataset, 'dataset'):
+            # 这是一个 Subset 对象
+            full_dataset = dataset.dataset
+            indices = dataset.indices
+
+            # 统计该客户端拥有的样本标签
+            for idx in indices:
+                label = full_dataset.labels[idx]
+                global_class_counts[label] = global_class_counts.get(label, 0) + 1
+        else:
+            # 直接访问数据集
+            # 假设数据集有 labels 属性
+            if hasattr(dataset, 'labels'):
+                labels = dataset.labels
+                for label in labels:
+                    global_class_counts[label] = global_class_counts.get(label, 0) + 1
+            else:
+                # 遍历数据集获取标签
+                for _, label in loader:
+                    if isinstance(label, torch.Tensor):
+                        label = label.item()
+                    global_class_counts[label] = global_class_counts.get(label, 0) + 1
+
+    # 检查是否有数据
+    if not global_class_counts:
+        print("  警告: 未找到任何类别数据，返回空集合")
+        return set()
+
+    # 3. 排序：按样本数从少到多
+    # items() 返回 (label, count) 元组
+    sorted_classes = sorted(global_class_counts.items(), key=lambda x: x[1])
+
+    # 打印一下最少和最多的类，确认统计无误
+    print(f"  - 全局样本最少的类: ID {sorted_classes[0][0]} (样本数: {sorted_classes[0][1]})")
+    print(f"  - 全局样本最多的类: ID {sorted_classes[-1][0]} (样本数: {sorted_classes[-1][1]})")
+
+    # 4. 截取尾部类别 (前 threshold_ratio 比例)
+    n_tail = int(len(sorted_classes) * threshold_ratio)
+    tail_classes = [c[0] for c in sorted_classes[:n_tail]]
+
+    print(f"  - 定义了 {len(tail_classes)} 个尾部类别 (Tail Classes)")
+
+    return set(tail_classes)
+
 
 def setup_experiment(args):
     """设置实验环境"""
@@ -129,6 +201,24 @@ def federated_training(args):
             class_to_test_indices[label].append(i)
             total_test_samples += 1
     print(f"  预计算完成: {len(class_to_test_indices)} 个类别, {total_test_samples} 个样本")
+
+    # 构建分类学矩阵和识别尾部类别
+    print("\n构建分类学矩阵和识别尾部类别...")
+    try:
+        taxonomy_matrix = build_taxonomy_matrix(num_classes=54, device=device)
+        print(f"  分类学矩阵构建完成: {taxonomy_matrix.shape}")
+    except Exception as e:
+        print(f"  警告: 无法构建分类学矩阵: {e}")
+        print("  将使用单位矩阵作为默认分类学矩阵")
+        taxonomy_matrix = torch.eye(54).to(device)  # 54个ID类别
+
+    # 使用全局数据识别尾部类别
+    if client_loaders and len(client_loaders) > 0:
+        tail_classes_set = get_global_tail_classes(client_loaders, threshold_ratio=0.5)
+        print(f"  全局尾部类别识别完成: {len(tail_classes_set)} 个尾部类别")
+    else:
+        tail_classes_set = set()
+        print("  警告: 无法识别尾部类别，使用空集合")
 
     # 创建全局模型
     print("\n创建全局模型...")
@@ -237,18 +327,13 @@ def federated_training(args):
         training_history = {
             'rounds': [],
             'train_losses': [],
-            'test_accuracies': [],
-            'avg_person_acc': [], # [关键修复 2] 确保有这个 key
-            'avg_global_local_acc': [],
-            'inc_accuracies': [],
+            'test_accuracies': [],      # ID 准确率 (对于 FedRoD 是 Head-P, 对于 FedAvg 是 Global)
             'test_losses': [],
-            'near_auroc': [],
-            'far_auroc': [],
-            # 新增的全面评估指标
-            'avg_person_acc_comprehensive': [],  # 新的全面评估的 ID 准确率
-            'avg_person_inc_acc': [],            # Head-P 在 IN-C 上的准确率
-            'avg_person_near_auroc': [],         # Head-P 在 Near-OOD 上的 AUROC
-            'avg_person_far_auroc': [],          # Head-P 在 Far-OOD 上的 AUROC
+            'tail_accuracies': [],      # 尾部类别准确率
+            'hierarchical_errors': [],  # 层级错误
+            'inc_accuracies': [],       # IN-C 准确率
+            'near_auroc': [],           # Near-OOD AUROC
+            'far_auroc': [],            # Far-OOD AUROC
             'best_acc': 0.0
         }
 
@@ -307,108 +392,124 @@ def federated_training(args):
 
         # === 评估阶段 ===
         if (round_num + 1) % args.eval_frequency == 0 or round_num == args.communication_rounds - 1:
-            print("\n评估模型...")
+            print("\n>>> 开始评估模型指标 <<<")
 
-            # 1. Server Global Model 评估
-            # [修复] 取消每5轮一次的限制，改为每轮都评估，确保数据长度一致
-            # 注意：这里评估的是 "Global Head-G" (这是对的，评估全局模型)
-            test_metrics = server.evaluate_global_model(
-                test_loader, near_ood_loader, far_ood_loader, inc_loader
-            )
+            # 初始化记录字典
+            current_metrics = {}
 
-            # 2. [关键修复 2] 方案 B：严谨的本地测试集评估
-            # 【关键】如果要评估 Client Head-P，最好是在 Client 本地训练结束时记录
-            # 或者在这里虽然 Head_P 稍微有点滞后，但如果加上 local_epochs > 1 会好很多
-            client_acc_p_list = []
-            client_acc_g_list = []
-            print(f"  正在评估 {len(clients)} 个客户端的个性化性能...")
+            # =========================================================
+            # 场景 A: FedAvg (所有指标都基于 Global Model)
+            # =========================================================
+            if args.algorithm == 'fedavg':
+                print("评估模式: FedAvg (Global Model 承担所有任务)")
 
-            for i, client in enumerate(clients):
-                # [修改] 直接使用预生成的加载器
-                loader = client_test_loaders[i]
-                if loader is None:
-                    continue
-
-                c_metrics = client.evaluate(loader)  # 直接调用，无需重新创建 DataLoader
-                client_acc_p_list.append(c_metrics['acc_p'])
-                client_acc_g_list.append(c_metrics['acc_g'])
-
-            avg_acc_p = sum(client_acc_p_list) / len(client_acc_p_list) if client_acc_p_list else 0.0
-            avg_acc_g_local = sum(client_acc_g_list) / len(client_acc_g_list) if client_acc_g_list else 0.0
-
-            # === 2. 增强版：客户端个性化评估 ===
-            print(f"  正在全面评估 {len(clients)} 个客户端的个性化性能 (Head-P)...")
-
-            # 初始化列表
-            p_acc_id_list = []
-            p_acc_inc_list = []
-            p_auroc_near_list = []
-            p_auroc_far_list = []
-
-            for i, client in enumerate(clients):
-                # 获取 ID 数据加载器 (已有的本地子集)
-                loader_id = client_test_loaders[i]
-                if loader_id is None:
-                    continue
-
-                # 调用新写的全能评估
-                # 注意：inc_loader, near_ood_loader, far_ood_loader 是全局的，直接传
-                # 这样做虽然有点慢（每个客户端都跑一遍全量 OOD），但对于写论文出数据是最稳妥的
-                c_metrics = client.evaluate_comprehensive(
-                    loader_id, inc_loader, near_ood_loader, far_ood_loader
+                # 1. 基础指标 (ID Acc, Tail Acc, Hierarchical Error)
+                id_acc, tail_acc, hier_err = evaluate_accuracy_metrics(
+                    server.global_model, test_loader, taxonomy_matrix, tail_classes_set, device
                 )
 
-                p_acc_id_list.append(c_metrics.get('acc_p_id', 0))
-                if 'acc_p_inc' in c_metrics:
-                    p_acc_inc_list.append(c_metrics['acc_p_inc'])
-                if 'auroc_p_near' in c_metrics:
-                    p_auroc_near_list.append(c_metrics['auroc_p_near'])
-                if 'auroc_p_far' in c_metrics:
-                    p_auroc_far_list.append(c_metrics['auroc_p_far'])
+                # 2. 泛化指标 (IN-C Acc)
+                # 注意：这里直接复用 accuracy metrics 函数，但传入 IN-C loader
+                inc_acc, _, _ = evaluate_accuracy_metrics(
+                    server.global_model, inc_loader, taxonomy_matrix, tail_classes_set, device
+                )
 
-            # 计算平均值
-            avg_p_id = sum(p_acc_id_list) / len(p_acc_id_list) if p_acc_id_list else 0
-            avg_p_inc = sum(p_acc_inc_list) / len(p_acc_inc_list) if p_acc_inc_list else 0
-            avg_p_near = sum(p_auroc_near_list) / len(p_auroc_near_list) if p_auroc_near_list else 0
-            avg_p_far = sum(p_auroc_far_list) / len(p_auroc_far_list) if p_auroc_far_list else 0
+                # 3. OOD 指标 (Near/Far AUROC)
+                # FedAvg 的 OOD 检测基于 Global Model 的特征和 Score Model
+                # 使用 server.evaluate_global_model 获取 OOD 指标
+                test_metrics = server.evaluate_global_model(
+                    test_loader, near_ood_loader, far_ood_loader, inc_loader
+                )
 
-            # 打印结果
-            print(f"  [Clients] Avg Head-P ID Acc:   {avg_p_id:.4f}")
-            print(f"  [Clients] Avg Head-P IN-C Acc: {avg_p_inc:.4f}")
-            print(f"  [Clients] Avg Head-P Near AUROC: {avg_p_near:.4f}")
-            print(f"  [Clients] Avg Head-P Far AUROC:  {avg_p_far:.4f}")
+                # 记录
+                current_metrics.update({
+                    'acc_id': id_acc,
+                    'acc_tail': tail_acc,
+                    'err_hier': hier_err,
+                    'acc_inc': inc_acc,
+                    'near_auroc': test_metrics.get('near_auroc', 0.0),
+                    'far_auroc': test_metrics.get('far_auroc', 0.0),
+                    'id_accuracy': test_metrics.get('id_accuracy', 0.0),
+                    'id_loss': test_metrics.get('id_loss', 0.0)
+                })
+
+            # =========================================================
+            # 场景 B: FedRoD (分离评估)
+            # 1. 准确率类指标 -> 评估 Personalized Model (Clients Avg)
+            # 2. OOD类指标    -> 评估 Generic Model (Server Global)
+            # =========================================================
+            elif args.algorithm == 'fedrod':
+                print("评估模式: FedRoD (Acc->Head-P, OOD->Head-G)")
+
+                # --- Part 1: 评估 Head-P (Acc, Tail, Hier, IN-C) ---
+                # 策略：在所有 Client 上测试，取平均值
+                p_acc_list, p_tail_list, p_hier_list, p_inc_list = [], [], [], []
+
+                for client in clients:
+                    # 使用客户端本地的测试集 (或者全局测试集，取决于你的设定，通常 Acc 看本地或全局皆可)
+                    # 建议：为了公平对比，这里统一用 全局测试集 test_loader
+                    # 注意：Client 模型 forward 时，FedRoD 会返回 (logits_g, logits_p, z)，
+                    # evaluate_accuracy_metrics 内部会自动取 logits_p
+
+                    c_id, c_tail, c_hier = evaluate_accuracy_metrics(
+                        client.model, test_loader, taxonomy_matrix, tail_classes_set, device
+                    )
+                    c_inc, _, _ = evaluate_accuracy_metrics(
+                        client.model, inc_loader, taxonomy_matrix, tail_classes_set, device
+                    )
+
+                    p_acc_list.append(c_id)
+                    p_tail_list.append(c_tail)
+                    p_hier_list.append(c_hier)
+                    p_inc_list.append(c_inc)
+
+                # 计算平均值
+                avg_p_acc = sum(p_acc_list) / len(p_acc_list) if p_acc_list else 0.0
+                avg_p_tail = sum(p_tail_list) / len(p_tail_list) if p_tail_list else 0.0
+                avg_p_hier = sum(p_hier_list) / len(p_hier_list) if p_hier_list else 0.0
+                avg_p_inc = sum(p_inc_list) / len(p_inc_list) if p_inc_list else 0.0
+
+                # --- Part 2: 评估 Head-G (OOD AUROC) ---
+                # 使用 Server 端的 Global Model (只包含 Head-G 和 Backbone)
+                # 注意：FedRoD 的 Global Model 在 forward 时通常只过 Head-G
+                test_metrics = server.evaluate_global_model(
+                    test_loader, near_ood_loader, far_ood_loader, inc_loader
+                )
+
+                # 记录
+                current_metrics.update({
+                    'acc_id': avg_p_acc,       # Head-P
+                    'acc_tail': avg_p_tail,    # Head-P
+                    'err_hier': avg_p_hier,    # Head-P
+                    'acc_inc': avg_p_inc,      # Head-P
+                    'near_auroc': test_metrics.get('near_auroc', 0.0), # Head-G
+                    'far_auroc': test_metrics.get('far_auroc', 0.0),    # Head-G
+                    'id_accuracy': test_metrics.get('id_accuracy', 0.0), # Head-G 的 ID 准确率
+                    'id_loss': test_metrics.get('id_loss', 0.0)
+                })
+
+            # --- 打印和保存日志 ---
+            print(f"  [Result] ID Acc: {current_metrics['acc_id']:.4f}")
+            print(f"  [Result] Tail Acc: {current_metrics['acc_tail']:.4f}")
+            print(f"  [Result] Hier Error: {current_metrics['err_hier']:.4f}")
+            print(f"  [Result] IN-C Acc: {current_metrics['acc_inc']:.4f}")
+            print(f"  [Result] Near AUROC: {current_metrics['near_auroc']:.4f}")
+            print(f"  [Result] Far AUROC: {current_metrics['far_auroc']:.4f}")
 
             # 3. 记录日志 (确保写入 history)
             training_history['rounds'].append(round_num + 1)
-            training_history['test_accuracies'].append(test_metrics['id_accuracy'])
-            training_history['avg_person_acc'].append(avg_acc_p) # 记录个性化精度
-            training_history['avg_global_local_acc'].append(avg_acc_g_local)
+            training_history['test_accuracies'].append(current_metrics['acc_id'])
+            training_history['test_losses'].append(current_metrics['id_loss'])
+            training_history['tail_accuracies'].append(current_metrics['acc_tail'])
+            training_history['hierarchical_errors'].append(current_metrics['err_hier'])
+            training_history['inc_accuracies'].append(current_metrics['acc_inc'])
+            training_history['near_auroc'].append(current_metrics['near_auroc'])
+            training_history['far_auroc'].append(current_metrics['far_auroc'])
             training_history['train_losses'].append(round_train_loss / len(selected_clients))
-            training_history['test_losses'].append(test_metrics['id_loss'])
-            # 新增的全面评估指标
-            training_history['avg_person_acc_comprehensive'].append(avg_p_id)
-            training_history['avg_person_inc_acc'].append(avg_p_inc)
-            training_history['avg_person_near_auroc'].append(avg_p_near)
-            training_history['avg_person_far_auroc'].append(avg_p_far)
-
-            if 'near_auroc' in test_metrics:
-                training_history['near_auroc'].append(test_metrics['near_auroc'])
-            if 'far_auroc' in test_metrics:
-                training_history['far_auroc'].append(test_metrics['far_auroc'])
-
-            # [新增] 记录并打印 IN-C 结果
-            if 'inc_accuracy' in test_metrics:
-                acc = test_metrics['inc_accuracy']
-                training_history['inc_accuracies'].append(acc)
-                print(f"  IN-C 准确率 (泛化): {acc:.4f}")
-                # 对比 ID 准确率，可以直观看到下降幅度
-                print(f"  准确率下降 (Drop): {test_metrics['id_accuracy'] - acc:.4f}")
-
-            print(f"  [Server] Global Head-G ID准确率: {test_metrics['id_accuracy']:.4f}")
-            print(f"  [Clients] Average Head-P ID准确率: {avg_acc_p:.4f} (个性化严谨指标)")
 
             # 4. 保存 Best Model (增加 client states)
-            current_acc = avg_acc_p # 建议：pFL 通常以个性化精度作为 Best 的标准，或者用 id_accuracy，你自己定
+            # 使用个性化精度作为 Best 的标准（对于 FedRoD）或 ID 准确率（对于 FedAvg）
+            current_acc = current_metrics['acc_id']
             if current_acc > best_acc:
                 best_acc = current_acc
                 training_history['best_acc'] = best_acc # 更新历史中的 best
@@ -424,7 +525,7 @@ def federated_training(args):
                     'best_acc': best_acc,
                     'config': vars(args)
                 }, os.path.join(experiment_dir, "best_model.pth"))
-                print(f"  ★ 新最优模型 (Avg Person Acc: {best_acc:.4f}) 已保存")
+                print(f"  ★ 新最优模型 (Acc: {best_acc:.4f}) 已保存")
 
             # 5. 保存定期 Checkpoint (增加 client states)
             if (round_num + 1) % args.save_frequency == 0:
@@ -639,14 +740,30 @@ def main():
         print("警告: 未找到全局准确率数据")
         final_acc = 0.0
 
-    # 个性化准确率
-    if 'avg_person_acc' in training_history and training_history['avg_person_acc']:
-        final_person_acc = training_history['avg_person_acc'][-1]
-        print(f"最终个性化准确率 (Head-P): {final_person_acc:.4f}")
-        if final_acc > 0:
-            print(f"个性化增益: {final_person_acc - final_acc:.4f}")
+    # 个性化准确率 (对于 FedRoD 是 Head-P, 对于 FedAvg 与全局相同)
+    # 注意: 现在 test_accuracies 对于 FedRoD 已经是 Head-P 的准确率
+    # 对于 FedAvg, test_accuracies 是全局模型的准确率
+    print(f"最终准确率: {final_acc:.4f}")
+    if args.algorithm == 'fedrod':
+        print("  (FedRoD: 这是 Head-P 的个性化准确率)")
     else:
-        print("提示: 未计算个性化准确率 (可能未启用相关评估)")
+        print("  (FedAvg: 这是全局模型的准确率)")
+
+    # 尾部类别准确率
+    if 'tail_accuracies' in training_history and training_history['tail_accuracies']:
+        final_tail_acc = training_history['tail_accuracies'][-1]
+        print(f"最终尾部类别准确率: {final_tail_acc:.4f}")
+        if final_acc > 0:
+            print(f"尾部性能差距: {final_acc - final_tail_acc:.4f}")
+    else:
+        print("提示: 未计算尾部类别准确率")
+
+    # 层级错误
+    if 'hierarchical_errors' in training_history and training_history['hierarchical_errors']:
+        final_hier_err = training_history['hierarchical_errors'][-1]
+        print(f"最终层级错误: {final_hier_err:.4f}")
+    else:
+        print("提示: 未计算层级错误")
 
     # IN-C准确率 (OOD泛化)
     if 'inc_accuracies' in training_history and training_history['inc_accuracies']:

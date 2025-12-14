@@ -19,6 +19,129 @@ import seaborn as sns
 from typing import Dict, List, Tuple
 import torch.nn.functional as F
 
+def get_tail_classes(train_dataset, threshold_ratio=0.5):
+    """
+    根据训练集统计，识别尾部类别 (样本数最少的 50% 类别)
+    返回: 尾部类别的索引列表
+
+    Args:
+        train_dataset: 训练数据集，需要包含 labels 属性
+        threshold_ratio: 尾部类别比例，默认为 0.5 (50%)
+
+    Returns:
+        set: 尾部类别的索引集合
+    """
+    # 统计每个类别的样本数
+    targets = np.array(train_dataset.labels)
+    class_counts = {}
+    for t in targets:
+        class_counts[t] = class_counts.get(t, 0) + 1
+
+    # 按样本数排序
+    sorted_classes = sorted(class_counts.items(), key=lambda x: x[1])
+
+    # 取样本数最少的前 threshold_ratio 比例作为尾部类别
+    n_tail = int(len(sorted_classes) * threshold_ratio)
+    tail_classes = [c[0] for c in sorted_classes[:n_tail]]
+
+    return set(tail_classes)
+
+
+def compute_hierarchical_error(predictions, targets, taxonomy_matrix):
+    """
+    计算平均层级错误 (Average Hierarchical Cost)
+
+    Args:
+        predictions: 模型的预测类别 (Argmax后的索引)
+        targets: 真实类别
+        taxonomy_matrix: CxC 的代价矩阵
+
+    Returns:
+        float: 平均层级错误
+    """
+    device = predictions.device
+    if taxonomy_matrix.device != device:
+        taxonomy_matrix = taxonomy_matrix.to(device)
+
+    cost_sum = 0.0
+    for pred, target in zip(predictions, targets):
+        cost_sum += taxonomy_matrix[target, pred].item()
+
+    return cost_sum / len(targets)
+
+
+def evaluate_accuracy_metrics(model, dataloader, taxonomy_matrix, tail_classes_set, device):
+    """
+    计算 ID Acc, Tail Acc, Hierarchical Error
+
+    Args:
+        model: 模型
+        dataloader: 数据加载器
+        taxonomy_matrix: 分类学代价矩阵
+        tail_classes_set: 尾部类别集合
+        device: 设备
+
+    Returns:
+        tuple: (id_acc, tail_acc, hier_error)
+    """
+    model.eval()
+    correct = 0
+    total = 0
+
+    # 尾部类别统计
+    tail_correct = 0
+    tail_total = 0
+
+    all_preds = []
+    all_targets = []
+
+    with torch.no_grad():
+        for inputs, labels in dataloader:
+            inputs, labels = inputs.to(device), labels.to(device)
+
+            # FedRoD 的模型可能返回 (logits_g, logits_p, features)，我们需要 logits_p
+            # 兼容处理：如果是元组，取第二个（Head-P）；如果不是，直接用
+            outputs = model(inputs)
+            if isinstance(outputs, tuple):
+                # 约定: FedRoD 返回 (logits_g, logits_p, features)
+                # 对于 Acc 评估，我们要用 logits_p
+                logits = outputs[1]
+            else:
+                logits = outputs
+
+            _, predicted = torch.max(logits.data, 1)
+
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+
+            # 收集用于计算层级错误的列表
+            all_preds.append(predicted)
+            all_targets.append(labels)
+
+            # 计算尾部精度
+            for p, t in zip(predicted, labels):
+                if t.item() in tail_classes_set:
+                    tail_total += 1
+                    if p == t:
+                        tail_correct += 1
+
+    # 1. ID Accuracy
+    id_acc = correct / total if total > 0 else 0.0
+
+    # 2. Tail Accuracy
+    tail_acc = tail_correct / tail_total if tail_total > 0 else 0.0
+
+    # 3. Hierarchical Error
+    if all_preds:
+        all_preds = torch.cat(all_preds)
+        all_targets = torch.cat(all_targets)
+        hier_error = compute_hierarchical_error(all_preds, all_targets, taxonomy_matrix)
+    else:
+        hier_error = 0.0
+
+    return id_acc, tail_acc, hier_error
+
+
 def evaluate_id_performance(model, data_loader, device, num_classes=54):
     """
     评估ID数据上的分类性能
@@ -97,7 +220,7 @@ def evaluate_id_performance(model, data_loader, device, num_classes=54):
     return metrics
 
 
-def evaluate_ood_detection(model, foogd_module, id_loader, ood_loader, device):
+def evaluate_ood_detection(model, foogd_module, id_loader, ood_loader, device, use_head_g=True):
     """
     评估OOD检测性能
 
@@ -107,6 +230,7 @@ def evaluate_ood_detection(model, foogd_module, id_loader, ood_loader, device):
         id_loader: ID数据加载器
         ood_loader: OOD数据加载器
         device: 设备
+        use_head_g: 是否使用Generic Head的特征进行OOD检测（FedRoD推荐）
 
     Returns:
         metrics: OOD检测指标字典
@@ -116,8 +240,8 @@ def evaluate_ood_detection(model, foogd_module, id_loader, ood_loader, device):
         foogd_module.eval()
 
     # 收集ID和OOD分数
-    id_scores = compute_ood_scores(model, foogd_module, id_loader, device)
-    ood_scores = compute_ood_scores(model, foogd_module, ood_loader, device)
+    id_scores = compute_ood_scores(model, foogd_module, id_loader, device, use_head_g)
+    ood_scores = compute_ood_scores(model, foogd_module, ood_loader, device, use_head_g)
 
     # 合并分数和标签
     scores = np.concatenate([id_scores, ood_scores])
@@ -153,7 +277,7 @@ def evaluate_ood_detection(model, foogd_module, id_loader, ood_loader, device):
     return metrics
 
 
-def compute_ood_scores(model, foogd_module, data_loader, device):
+def compute_ood_scores(model, foogd_module, data_loader, device, use_head_g=True):
     """
     计算OOD分数
 
@@ -162,6 +286,7 @@ def compute_ood_scores(model, foogd_module, data_loader, device):
         foogd_module: FOOGD模块
         data_loader: 数据加载器
         device: 设备
+        use_head_g: 是否使用Generic Head的特征进行OOD检测（FedRoD推荐）
 
     Returns:
         ood_scores: OOD分数数组
@@ -172,7 +297,23 @@ def compute_ood_scores(model, foogd_module, data_loader, device):
         for data, _ in data_loader:
             data = data.to(device)
 
-            _, _, features = model(data)
+            # 获取模型输出
+            outputs = model(data)
+
+            # 根据 use_head_g 参数选择特征
+            if isinstance(outputs, tuple):
+                # FedRoD 模型返回 (logits_g, logits_p, features)
+                if use_head_g:
+                    # 使用 Generic Head 的特征（第三个输出）
+                    features = outputs[2]
+                else:
+                    # 使用 Personal Head 的特征（需要从模型中提取）
+                    # 注意：FedRoD 模型默认返回的是 Generic Head 的特征
+                    # 如果需要 Personal Head 的特征，可能需要修改模型结构
+                    features = outputs[2]  # 暂时使用相同的特征
+            else:
+                # 非 FedRoD 模型
+                features = outputs
 
             if foogd_module:
                 # [修正] 必须先归一化，与训练时保持一致！
@@ -285,7 +426,7 @@ def plot_confusion_matrix(cm, class_names, output_path):
 
 
 def generate_evaluation_report(model, foogd_module, test_loader, near_ood_loader,
-                              far_ood_loader, device, output_dir):
+                              far_ood_loader, device, output_dir, use_head_g=True):
     """
     生成完整的评估报告
 
@@ -297,6 +438,7 @@ def generate_evaluation_report(model, foogd_module, test_loader, near_ood_loader
         far_ood_loader: Far-OOD数据加载器
         device: 设备
         output_dir: 输出目录
+        use_head_g: 是否使用Generic Head的特征进行OOD检测（FedRoD推荐）
 
     Returns:
         report: 评估报告字典
@@ -321,7 +463,7 @@ def generate_evaluation_report(model, foogd_module, test_loader, near_ood_loader
     print("评估Near-OOD检测性能...")
     if near_ood_loader is not None:
         near_ood_metrics = evaluate_ood_detection(
-            model, foogd_module, test_loader, near_ood_loader, device
+            model, foogd_module, test_loader, near_ood_loader, device, use_head_g
         )
         report['near_ood_detection'] = near_ood_metrics
 
@@ -335,7 +477,7 @@ def generate_evaluation_report(model, foogd_module, test_loader, near_ood_loader
     print("评估Far-OOD检测性能...")
     if far_ood_loader is not None:
         far_ood_metrics = evaluate_ood_detection(
-            model, foogd_module, test_loader, far_ood_loader, device
+            model, foogd_module, test_loader, far_ood_loader, device, use_head_g
         )
         report['far_ood_detection'] = far_ood_metrics
 
