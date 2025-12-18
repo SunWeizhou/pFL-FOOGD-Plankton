@@ -16,6 +16,12 @@ experiments_5.0/
 test_evaluation/
 test_output/
 test_experiments/
+
+# experiments_benchmark 目录：只排除模型文件，保留图片和结果
+experiments_benchmark/**/*.pth
+experiments_benchmark/**/*.pt
+experiments_benchmark/**/*.bin
+experiments_benchmark/**/checkpoints/
 # visualizations/  # 这个文件夹我们会保留并上传
 
 # 模型检查点和数据文件（大文件，不上传）
